@@ -8,7 +8,7 @@ name: Publish Doxygen to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    branches: [no]
   workflow_dispatch:
 
 # Only one concurrent Pages deployment at a time. Cancel in-progress
