@@ -1,0 +1,24 @@
+[build-system]
+requires = ["scikit-build-core>=0.5.0", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyjet"
+version = "0.1.0"
+description = "A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)"
+readme = "README.md"
+requires-python = ">=3.8"
+authors = [
+    { name = "TestyLemonad" }
+]
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+# Указываем CMake, что собираем именно Python-модуль
+cmake.define.BUILD_PYTHON_BINDINGS = "ON"
