@@ -19,6 +19,11 @@ jobs:
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.0
+        env:
+          # Включаем детальный лог сборки (вывод CMake и GCC/MSVC)
+          CIBW_BUILD_VERBOSITY: 1
+          # Временно собираем только под CPython 3.11 для быстрой проверки
+          CIBW_BUILD: "cp311-*"
 
       - uses: actions/upload-artifact@v4
         with:
