@@ -19,7 +19,7 @@ else()
 
     find_package(pybind11 CONFIG REQUIRED)
 
-    # Автоматически находим все C++ исходники
+    # Ищем все C++ файлы
     file(GLOB_RECURSE PYJET_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
@@ -28,11 +28,12 @@ else()
     # Собираем C++ модуль для Python
     pybind11_add_module(_pyjet ${PYJET_SOURCES})
 
-    # Подключаем общие исходники и НАШ специальный конфиг для ПК
+    # Передаём src/desktop, где ИМЕННО И ЛЕЖИТ JetConfig.hpp!
     target_include_directories(_pyjet PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}/desktop
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/desktop
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
+    
     target_compile_features(_pyjet PRIVATE cxx_std_17)
 
 endif()
