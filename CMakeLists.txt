@@ -28,7 +28,11 @@ else()
     # Собираем C++ модуль для Python
     pybind11_add_module(_pyjet ${PYJET_SOURCES})
 
-    target_include_directories(_pyjet PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    # Подключаем общие исходники и НАШ специальный конфиг для ПК
+    target_include_directories(_pyjet PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}/desktop
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
     target_compile_features(_pyjet PRIVATE cxx_std_17)
 
 endif()
