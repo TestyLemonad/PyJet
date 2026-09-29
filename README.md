@@ -2,7 +2,7 @@
   <img src="Logo.png" alt="Jet logo" width="512px">
 </p>
 
-# Jet
+# Jet 
 
 **Jet** is a dependency-free, fixed-function 3D software rasteriser written in
 C++17. It targets embedded hardware with limited CPU and memory, including
