@@ -1,18 +1,16 @@
 cmake_minimum_required(VERSION 3.15)
 project(pyjet CXX C)
 
-# --- Поиск директории с JetConfig.hpp ---
-file(GLOB_RECURSE JET_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/*/JetConfig.hpp" "${CMAKE_CURRENT_SOURCE_DIR}/JetConfig.hpp")
-
-if(JET_CONFIG_FILE)
-    list(GET JET_CONFIG_FILE 0 FIRST_JET_CONFIG)
-    get_filename_component(JET_CONFIG_INCLUDE_DIR "${FIRST_JET_CONFIG}" DIRECTORY)
-else()
-    set(JET_CONFIG_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
-endif()
-
 # --- Вариант 1: Сборка для ESP-IDF (микроконтроллеры / zest OS) ---
 if(COMMAND idf_component_register)
+
+    if(NOT DEFINED JET_CONFIG_INCLUDE_DIR)
+        if(EXISTS "${PROJECT_DIR}/main/firmware/JetConfig.hpp")
+            set(JET_CONFIG_INCLUDE_DIR "${PROJECT_DIR}/main/firmware")
+        else()
+            set(JET_CONFIG_INCLUDE_DIR "${PROJECT_DIR}/main")
+        endif()
+    endif()
 
     idf_component_register(
         SRC_DIRS "src"
@@ -30,19 +28,20 @@ else()
 
     find_package(pybind11 CONFIG REQUIRED)
 
-    # Автоматически находим ВСЕ C++ исходники
+    # Находим все исходники C++
     file(GLOB_RECURSE PYJET_SOURCES 
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
     )
 
-    # Собираем C++ модуль для Python
     pybind11_add_module(_pyjet ${PYJET_SOURCES})
 
-    # Передаем и src/, и автоматическую папку с JetConfig.hpp
+    # Явно подключаем ВСЕ возможные директории с заголовочниками
     target_include_directories(_pyjet PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${JET_CONFIG_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/main
+        ${CMAKE_CURRENT_SOURCE_DIR}/main/firmware
+        ${CMAKE_CURRENT_SOURCE_DIR}/firmware
     )
     
     target_compile_features(_pyjet PRIVATE cxx_std_17)
