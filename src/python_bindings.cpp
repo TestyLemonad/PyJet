@@ -24,13 +24,16 @@ PYBIND11_MODULE(_pyjet, m) {
     // Обёртка для Камеры
     py::class_<Camera>(m, "Camera")
         .def(py::init<>())
-        .def("setPosition", &Camera::setPosition)
+        // Оборачиваем setPosition в лямбду, чтобы pybind11 не гадал с типами/перегрузками
+        .def("setPosition", [](Camera& self, float x, float y, float z) {
+            self.setPosition(x, y, z);
+        })
         .def("setFOV", &Camera::setFOV);
 
     // Обёртка для Сцены
     py::class_<Scene>(m, "Scene")
         .def(py::init([](int w, int h) {
-            // Автоматически выделяем память под кадр
+            // Выделяем буферы кадра
             uint16_t* colorBuf = new uint16_t[w * h];
             uint16_t* depthBuf = new uint16_t[ZBUFFER_STRIDE(w) * h];
             auto scene = new Scene(colorBuf, depthBuf, w, h);
@@ -39,9 +42,13 @@ PYBIND11_MODULE(_pyjet, m) {
         }))
         .def("setCamera", &Scene::setCamera)
         .def("render", &Scene::render)
-        // Метод для получения пикселей кадра в Python (байты RGB565)
+        // Забираем буфер напрямую через поля класса/макросы
         .def("get_framebuffer", [](Scene& self) {
-            int size = self.getWidth() * self.getHeight() * sizeof(uint16_t);
-            return py::bytes(reinterpret_cast<const char*>(self.getColorBuffer()), size);
+            // Если ширину/высоту хранит сцена в публичных полях width/height
+            // Если в твоем Scene.hpp они называются иначе — просто используй w и h
+            int w = self.width;
+            int h = self.height;
+            int size = w * h * sizeof(uint16_t);
+            return py::bytes(reinterpret_cast<const char*>(self.colorBuffer), size);
         });
 }
