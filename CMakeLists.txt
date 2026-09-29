@@ -1,22 +1,21 @@
 cmake_minimum_required(VERSION 3.15)
 project(pyjet CXX C)
 
-# --- Автоматический поиск папки с JetConfig.hpp ---
-file(GLOB_RECURSE FOUND_JET_CONFIG "${CMAKE_CURRENT_SOURCE_DIR}/*JetConfig.hpp*")
-
-set(JET_CONFIG_DIRS "")
-foreach(CONFIG_PATH ${FOUND_JET_CONFIG})
-    get_filename_component(CONFIG_DIR ${CONFIG_PATH} DIRECTORY)
-    list(APPEND JET_CONFIG_DIRS ${CONFIG_DIR})
-endforeach()
-
 # --- Вариант 1: Сборка для ESP-IDF (микроконтроллеры / zest OS) ---
 if(COMMAND idf_component_register)
+
+    if(NOT DEFINED JET_CONFIG_INCLUDE_DIR)
+        if(EXISTS "${PROJECT_DIR}/main/firmware/JetConfig.hpp")
+            set(JET_CONFIG_INCLUDE_DIR "${PROJECT_DIR}/main/firmware")
+        else()
+            set(JET_CONFIG_INCLUDE_DIR "${PROJECT_DIR}/main")
+        endif()
+    endif()
 
     idf_component_register(
         SRC_DIRS "src"
         INCLUDE_DIRS "src"
-        PRIV_INCLUDE_DIRS ${JET_CONFIG_DIRS}
+        PRIV_INCLUDE_DIRS "${JET_CONFIG_INCLUDE_DIR}"
     )
 
     target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
@@ -38,10 +37,22 @@ else()
     # Собираем C++ модуль для Python
     pybind11_add_module(_pyjet ${PYJET_SOURCES})
 
-    # Передаем src/ и абсолютно все найденные папки с конфигами
+    # Авто-поиск директории с JetConfig.hpp
+    file(GLOB_RECURSE ALL_CONFIG_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "JetConfig.hpp")
+    set(EXTRA_INCLUDES "")
+    foreach(CFG_FILE ${ALL_CONFIG_FILES})
+        get_filename_component(CFG_DIR "${CFG_FILE}" DIRECTORY)
+        list(APPEND EXTRA_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/${CFG_DIR}")
+    endforeach()
+
+    # Включаем src, найденные конфиги и стандартные папки на всякий случай
     target_include_directories(_pyjet PRIVATE 
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${JET_CONFIG_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR}/main
+        ${CMAKE_CURRENT_SOURCE_DIR}/main/firmware
+        ${CMAKE_CURRENT_SOURCE_DIR}/firmware
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${EXTRA_INCLUDES}
     )
     
     target_compile_features(_pyjet PRIVATE cxx_std_17)
