@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: # Позволяет запускать воркфлоу вручную из вкладки Actions!
 
 jobs:
   build_wheels:
@@ -20,9 +21,7 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v2.16.0
         env:
-          # Включаем детальный лог сборки (вывод CMake и GCC/MSVC)
           CIBW_BUILD_VERBOSITY: 1
-          # Временно собираем только под CPython 3.11 для быстрой проверки
           CIBW_BUILD: "cp311-*"
 
       - uses: actions/upload-artifact@v4
@@ -33,6 +32,8 @@ jobs:
   publish:
     needs: [build_wheels]
     runs-on: ubuntu-latest
+    # Публикуем на PyPI только если это был запуск по тегу v*
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/download-artifact@v4
         with:
