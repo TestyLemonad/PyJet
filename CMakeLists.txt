@@ -1,55 +1,39 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include "Jet.hpp"
+cmake_minimum_required(VERSION 3.15)
+project(pyjet CXX C)
 
-namespace py = pybind11;
-using namespace Renderer;
+# --- Вариант 1: Сборка для ESP-IDF (микроконтроллеры / zest OS) ---
+if(COMMAND idf_component_register)
 
-PYBIND11_MODULE(_pyjet, m) {
-    m.doc() = "Python bindings for Jet 3D software rasteriser";
+    idf_component_register(
+        SRC_DIRS "src"
+        INCLUDE_DIRS "src"
+    )
 
-    // Пробрасываем перечисление ShadingMode
-    py::enum_<ShadingMode>(m, "ShadingMode")
-        .value("FLAT", ShadingMode::FLAT)
-        .value("GOURAUD", ShadingMode::GOURAUD)
-        .value("PHONG", ShadingMode::PHONG)
-        .value("WIREFRAME", ShadingMode::WIREFRAME)
-        .export_values();
+    target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 
-    // Обёртка для Материала
-    py::class_<Material>(m, "Material")
-        .def(py::init<uint16_t>(), py::arg("color") = 0xFFFF)
-        .def_readwrite("shadingMode", &Material::shadingMode);
+# --- Вариант 2: Сборка PyJet для ПК через pybind11 ---
+else()
 
-    // Обёртка для Камеры
-    py::class_<Camera>(m, "Camera")
-        .def(py::init<>())
-        .def("setPosition", [](Camera& self, float x, float y, float z) {
-            self.setPosition(x, y, z);
-        })
-        .def("setFOV", [](Camera& self, float fov) {
-            self.setFOV(fov);
-        });
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-    // Обёртка для Сцены
-    py::class_<Scene>(m, "Scene")
-        .def(py::init([](int w, int h) {
-            uint16_t* colorBuf = new uint16_t[w * h];
-            uint16_t* depthBuf = new uint16_t[ZBUFFER_STRIDE(w) * h];
-            auto scene = new Scene(colorBuf, depthBuf, w, h);
-            scene->setClearBuffer(true);
-            return scene;
-        }))
-        .def("setCamera", &Scene::setCamera)
-        .def("render", &Scene::render)
-        .def("get_framebuffer", [](Scene& self) {
-            // Размеры берутся напрямую из глобального конфига Jet
-            int w = JET_WIDTH;
-            int h = JET_HEIGHT;
-            int size = w * h * sizeof(uint16_t);
-            
-            // Если в Scene буфер кадра лежит в публичном поле colorBufferPtr или getBuffer()
-            // Ниже используем прямую отдачу памяти сцены
-            return py::bytes(reinterpret_cast<const char*>(&self), size); 
-        });
-}
+    find_package(pybind11 CONFIG REQUIRED)
+
+    # Ищем все C++ файлы
+    file(GLOB_RECURSE PYJET_SOURCES 
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+    )
+
+    # Собираем C++ модуль для Python
+    pybind11_add_module(_pyjet ${PYJET_SOURCES})
+
+    # Пути к заголовочным файлам
+    target_include_directories(_pyjet PRIVATE 
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/desktop
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    
+    target_compile_features(_pyjet PRIVATE cxx_std_17)
+
+endif()
