@@ -47,7 +47,6 @@ PYBIND11_MODULE(_pyjet, m) {
             self.setPosition(x, y, z);
         })
         .def("setFOV", [](Camera& self, float fov) {
-            // В C++ setFOV принимает градусы и ширину экрана
             self.setFOV(fov, JET_WIDTH);
         });
 
