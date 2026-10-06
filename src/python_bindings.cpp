@@ -51,7 +51,7 @@ PYBIND11_MODULE(_pyjet, m) {
         });
 
     py::class_<PySceneWrapper>(m, "Scene")
-        .def(py::init<int, int>(), py::arg("width") = JET_WIDTH, py::arg("height") = JET_HEIGHT)
+        .def(py::init<int, int>(), py::arg("width") = JET_WIDTH, py::arg("height") = JET_HEIGHT) // Пожалуйста, пусть это заработает!
         .def("setCamera", [](PySceneWrapper& self, Camera& cam) {
             self.scene->setCamera(&cam);
         })
