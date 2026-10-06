@@ -5,7 +5,7 @@
 namespace py = pybind11;
 using namespace Renderer;
 
-// Структура-обёртка для Python, управляет буферами кадра
+// Простая структура-обёртка для Python, чтобы безопасно владеть буфером кадра
 struct PySceneWrapper {
     Scene* scene;
     uint16_t* colorBuf;
@@ -43,15 +43,15 @@ PYBIND11_MODULE(_pyjet, m) {
 
     py::class_<Camera>(m, "Camera")
         .def(py::init<>())
-        .def("setPosition", [](Camera& self, int32_t x, int32_t y, int32_t z) {
+        .def("setPosition", [](Camera& self, float x, float y, float z) {
             self.setPosition(x, y, z);
         })
         .def("setFOV", [](Camera& self, float fov) {
-            self.setFOV(fov, JET_WIDTH);
+            self.setFOV(fov, 320);
         });
 
     py::class_<PySceneWrapper>(m, "Scene")
-        .def(py::init<int, int>(), py::arg("width") = JET_WIDTH, py::arg("height") = JET_HEIGHT) // Пожалуйста, пусть это заработает!
+        .def(py::init<int, int>(), py::arg("width") = 320, py::arg("height") = 240)
         .def("setCamera", [](PySceneWrapper& self, Camera& cam) {
             self.scene->setCamera(&cam);
         })
