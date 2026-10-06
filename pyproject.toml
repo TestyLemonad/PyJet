@@ -22,3 +22,7 @@ classifiers = [
 cmake.build-type = "Release"
 # Указываем CMake, что собираем именно Python-модуль
 cmake.define.BUILD_PYTHON_BINDINGS = "ON"
+
+[tool.cibuildwheel]
+build = "cp311-*"
+build-verbosity = 1
