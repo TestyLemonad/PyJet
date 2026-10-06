@@ -1,10 +1,27 @@
 from setuptools import setup, find_packages
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 
+# Все C++ исходники движка + файл биндингов
+cpp_sources = [
+    "src/python_bindings.cpp",
+    "src/Camera.cpp",
+    "src/Light.cpp",
+    "src/Material.cpp",
+    "src/Object.cpp",
+    "src/PostFX.cpp",
+    "src/Primitives.cpp",
+    "src/Renderer.cpp",
+    "src/Scene.cpp",
+    "src/Sprite2D.cpp",
+    "src/Texture.cpp",
+    "src/TiledSpan.cpp",
+    "src/TrigLUT.cpp",
+]
+
 ext_modules = [
     Pybind11Extension(
         "pyjet._pyjet",
-        sources=["src/python_bindings.cpp"],
+        sources=cpp_sources,
         include_dirs=["src", "src/desktop"],
         cxx_std=17,
     ),
