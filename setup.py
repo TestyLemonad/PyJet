@@ -3,9 +3,9 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 ext_modules = [
     Pybind11Extension(
-        "pyjet._pyjet",  # Компилирует C++ модуль прямо внутрь пакета pyjet
+        "pyjet._pyjet",
         sources=["src/python_bindings.cpp"],
-        include_dirs=["src"],
+        include_dirs=["src", "src/desktop"],
         cxx_std=17,
     ),
 ]
@@ -15,7 +15,7 @@ setup(
     version="0.1.0",
     author="TestyLemonad",
     description="Python bindings for Jet 3D software rasteriser",
-    package_dir={"": "src"},  # Указывает, что пакеты лежат внутри папки src
+    package_dir={"": "src"},
     packages=find_packages(where="src"),
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
