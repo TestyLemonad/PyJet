@@ -29,7 +29,7 @@ ext_modules = [
 ]
 
 setup(
-    name="pyjet",
+    name="pyjet3d",
     version="0.1.0",
     author="TestyLemonad",
     description="Python bindings for Jet 3D software rasteriser",

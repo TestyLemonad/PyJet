@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "pybind11>=2.10.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pyjet"
+name = "pyjet3d"
 version = "0.1.0"
 description = "A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)"
 readme = "README.md"
