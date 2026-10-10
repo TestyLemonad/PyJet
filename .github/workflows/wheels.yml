@@ -20,6 +20,13 @@ jobs:
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2.1
+        env:
+          # Собираем все версии CPython (cp3*), ...
+          CIBW_BUILD: "cp3*-*"
+          # ... но исключаем Python 3.8 и ниже, PyPy и 32-битные сборки
+          CIBW_SKIP: "cp38-* pp* *-win32 *-manylinux_i686 *-musllinux_i686"
+          # Для macOS собираем и x86_64, и arm64 (опционально, раскомментируй при необходимости)
+          # CIBW_ARCHS_MACOS: "x86_64 arm64"
 
       - uses: actions/upload-artifact@v4
         with:
