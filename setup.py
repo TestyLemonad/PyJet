@@ -4,6 +4,7 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 # Все C++ исходники движка + файл биндингов
 cpp_sources = [
     "src/python_bindings.cpp",
+    "src/BlendSpans.cpp",
     "src/Camera.cpp",
     "src/Light.cpp",
     "src/Material.cpp",
