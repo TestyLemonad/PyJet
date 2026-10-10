@@ -7,7 +7,7 @@ name = "pyjet3d"
 version = "0.1.0"
 description = "A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 authors = [
     { name = "TestyLemonad" }
 ]
