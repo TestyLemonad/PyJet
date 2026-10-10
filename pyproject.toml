@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyjet3d"
-version = "0.1.0"
+version = "0.1.1"
 description = "A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)"
 readme = "README.md"
 requires-python = ">=3.9"
