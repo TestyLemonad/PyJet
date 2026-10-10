@@ -4,6 +4,7 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 # Все C++ исходники движка + файл биндингов
 cpp_sources = [
     "src/python_bindings.cpp",
+    "src/BlendSpans.cpp",
     "src/Camera.cpp",
     "src/Light.cpp",
     "src/Material.cpp",
@@ -28,7 +29,7 @@ ext_modules = [
 ]
 
 setup(
-    name="pyjet",
+    name="pyjet3d",
     version="0.1.0",
     author="TestyLemonad",
     description="Python bindings for Jet 3D software rasteriser",
