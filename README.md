@@ -4,6 +4,37 @@
 
 # Jet 
 
+## Python package quick start
+
+```bash
+pip install pyjet3d
+```
+
+```python
+import pyjet
+import pyjet3d  # alias module
+```
+
+The PyPI package name is `pyjet3d`. The primary import is `pyjet`, and
+`pyjet3d` is provided as an alias (`pyjet.Scene is pyjet3d.Scene`).
+
+### Python triangle example
+
+```python
+import pyjet
+
+scene = pyjet.Scene(320, 240)
+cam = pyjet.Camera()
+cam.setPosition(0, 0, -500)
+cam.setFOV(70)
+scene.setCamera(cam)
+
+mat = pyjet.Material(0xF800)
+mat.shadingMode = pyjet.ShadingMode.FLAT
+scene.addMesh([(0, 120, 0), (-120, -120, 0), (120, -120, 0)], mat)
+scene.render()
+```
+
 **Jet** is a dependency-free, fixed-function 3D software rasteriser written in
 C++17. It targets embedded hardware with limited CPU and memory, including
 ESP32 and STM32, and also runs on desktop PCs and Raspberry Pi.
