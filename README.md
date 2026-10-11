@@ -4,6 +4,20 @@
 
 # Jet 
 
+## Python package quick start
+
+```bash
+pip install pyjet3d
+```
+
+```python
+import pyjet
+import pyjet3d  # alias module
+```
+
+The PyPI package name is `pyjet3d`. The primary import is `pyjet`, and
+`pyjet3d` is provided as an alias (`pyjet.Scene is pyjet3d.Scene`).
+
 **Jet** is a dependency-free, fixed-function 3D software rasteriser written in
 C++17. It targets embedded hardware with limited CPU and memory, including
 ESP32 and STM32, and also runs on desktop PCs and Raspberry Pi.

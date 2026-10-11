@@ -15,6 +15,7 @@ src/Sprite2D.cpp
 src/Texture.cpp
 src/TiledSpan.cpp
 src/TrigLUT.cpp
+src/pyjet3d.py
 src/python_bindings.cpp
 src/pyjet/__init__.py
 src/pyjet3d.egg-info/PKG-INFO
@@ -22,3 +23,4 @@ src/pyjet3d.egg-info/SOURCES.txt
 src/pyjet3d.egg-info/dependency_links.txt
 src/pyjet3d.egg-info/not-zip-safe
 src/pyjet3d.egg-info/top_level.txt
+tests/test_python_package_alias.py

@@ -35,6 +35,7 @@ setup(
     description="Python bindings for Jet 3D software rasteriser",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
+    py_modules=["pyjet3d"],
     ext_modules=ext_modules,
     cmdclass={"build_ext": build_ext},
     zip_safe=False,

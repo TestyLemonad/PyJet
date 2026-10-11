@@ -1,13 +1,13 @@
 Metadata-Version: 2.4
 Name: pyjet3d
-Version: 0.1.0
+Version: 0.1.1
 Summary: A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)
 Author: TestyLemonad
 License: MIT
 Classifier: Programming Language :: C++
 Classifier: Programming Language :: Python :: 3
 Classifier: Topic :: Multimedia :: Graphics :: 3D Rendering
-Requires-Python: >=3.8
+Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 License-File: LICENSE
 Dynamic: license-file
@@ -18,6 +18,20 @@ Dynamic: requires-python
 </p>
 
 # Jet 
+
+## Python package quick start
+
+```bash
+pip install pyjet3d
+```
+
+```python
+import pyjet
+import pyjet3d  # alias module
+```
+
+The PyPI package name is `pyjet3d`. The primary import is `pyjet`, and
+`pyjet3d` is provided as an alias (`pyjet.Scene is pyjet3d.Scene`).
 
 **Jet** is a dependency-free, fixed-function 3D software rasteriser written in
 C++17. It targets embedded hardware with limited CPU and memory, including
