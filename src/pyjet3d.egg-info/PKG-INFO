@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: pyjet3d
-Version: 0.1.1
+Version: 0.2.0
 Summary: A tiny, dependency-free 3D software rasteriser for Python (powered by CubeCoders/Jet)
 Author: TestyLemonad
 License: MIT
