@@ -1,0 +1,609 @@
+# PyJet: API для Python
+
+[English](Python.md) | **Русский**
+
+`pyjet3d` — привязки Python к [Jet](https://github.com/CubeCoders/Jet),
+программному растеризатору без внешних зависимостей, написанному на C++17.
+Он рисует треугольники на CPU в RGB565-фреймбуфер, поэтому не требует
+OpenGL, Vulkan, GPU или библиотеки для создания окон.
+
+Это руководство описывает API, доступное из Python. У нативного движка есть
+много дополнительных возможностей; ссылки на его документацию приведены
+в конце.
+
+## Содержание
+
+- [Установка](#установка)
+- [Быстрый старт](#быстрый-старт)
+- [Координаты и единицы](#координаты-и-единицы)
+- [Жизненный цикл сцены](#жизненный-цикл-сцены)
+- [Камера](#камера)
+- [Меши и порядок обхода вершин](#меши-и-порядок-обхода-вершин)
+- [Материалы и затенение](#материалы-и-затенение)
+- [Источники света](#источники-света)
+- [Фреймбуфер и изображения](#фреймбуфер-и-изображения)
+- [Анимация](#анимация)
+- [Справочник API](#справочник-api)
+- [Ограничения и устранение проблем](#ограничения-и-устранение-проблем)
+- [Демки](#демки)
+- [Документация движка](#документация-движка)
+
+## Установка
+
+```bash
+pip install pyjet3d
+```
+
+Требования:
+
+- Python 3.9 или новее.
+- Платформа, для которой опубликовано колесо (Linux, Windows или macOS), либо
+  компилятор C++17 при сборке из исходников.
+- Никаких зависимостей во время выполнения, кроме стандартной библиотеки
+  Python.
+
+```python
+import pyjet3d
+
+print(pyjet3d.__version__)
+print(pyjet3d.PIXEL_FORMAT)  # RGB565
+```
+
+> **Переход с 0.2:** импорт теперь называется `pyjet3d`, а не `pyjet`.
+> Пакет переименован, чтобы не конфликтовать с посторонним пакетом `pyjet`
+> на PyPI. Замените `import pyjet` на `import pyjet3d`.
+
+## Быстрый старт
+
+```python
+import pyjet3d
+
+# 1. Создаём сцену с полноразмерным RGB565-фреймбуфером.
+scene = pyjet3d.Scene(320, 240)
+
+# 2. Ставим камеру перед геометрией и направляем её в начало координат.
+camera = pyjet3d.Camera()
+camera.setPosition(0, 0, -500)
+camera.setFOV(70, scene.width)  # FOV в градусах; ширина задаёт масштаб проекции
+camera.nearPlane = 32
+camera.farPlane = 4096
+scene.setCamera(camera)
+
+# 3. Создаём материал. Цвета материалов задаются в RGB565, а не в 8-битном RGB.
+material = pyjet3d.Material(0xF800)  # ярко-красный
+material.shadingMode = pyjet3d.ShadingMode.FLAT
+
+# 4. Добавляем треугольник. Лицевая сторона — против часовой стрелки.
+scene.addMesh(
+    [(0, 120, 0), (120, -120, 0), (-120, -120, 0)],
+    material,
+)
+
+# 5. Рендер синхронный.
+scene.render()
+
+# 6. Читаем фреймбуфер. В нём width * height little-endian uint16
+#    значений RGB565 — ровно то, что возвращает get_framebuffer().
+framebuffer = scene.get_framebuffer()
+assert len(framebuffer) == scene.width * scene.height * 2
+
+# 7. Преобразуем в RGB888 и сохраняем PPM без сторонних библиотек.
+rgb = pyjet3d.framebuffer_to_rgb(framebuffer, scene.width, scene.height)
+with open("triangle.ppm", "wb") as out:
+    out.write(b"P6\n%d %d\n255\n" % (scene.width, scene.height))
+    out.write(rgb)
+```
+
+Сцена рендерится программно, и после возврата из `render()` фреймбуфер уже
+готов. Здесь нет swap chain и окна: приложение само решает, куда выводить,
+кодировать или загружать пиксели.
+
+## Координаты и единицы
+
+- Единицы мирового пространства произвольны. В примерах куб имеет размер
+  в сотни единиц, потому что стандартные плоскости отсечения камеры заданы
+  в том же диапазоне.
+- Координаты вершин меша при создании преобразуются в целые мировые
+  единицы; дробные значения округляются.
+- Камера по умолчанию находится в `(0, 0, 0)` и смотрит вдоль `+Z`.
+  Типичный вариант — камера в `(0, 0, -500)`, направленная на геометрию
+  около начала координат.
+- `+Y` направлена вверх, `+X` — вправо на экране.
+- Повороты `x`, `y`, `z` — углы Эйлера в градусах.
+- `nearPlane` и `farPlane` — расстояния отсечения в пространстве камеры.
+  Геометрия ближе `nearPlane` или дальше `farPlane` отсекается.
+- Строка фреймбуфера `y = 0` — верхняя. `get_pixel(x, y)` использует ту же
+  систему координат.
+
+Стандартные значения near/far — `128` и `1024`. Задавайте их явно, если
+сцена использует другой масштаб: куб радиуса 120 легко помещается, а большой
+мир — нет.
+
+## Жизненный цикл сцены
+
+`Scene` владеет цветовым буфером и буфером глубины. Конфигурация Python
+использует:
+
+- полноразмерный RGB565-цветовой буфер (один `uint16_t` на пиксель);
+- буфер глубины (Z-буферизация включена);
+- путь освещения;
+- один слот направленного света и один слот окружающего света;
+- объекты точечного света, которые можно хранить для
+  пользовательского/нативного затенения.
+
+Типичный кадр:
+
+```python
+scene.setBackcolor(0x0841)  # цвет очистки в RGB565
+scene.render()
+
+framebuffer = scene.get_framebuffer()
+```
+
+`setClearBuffer(False)` сохраняет содержимое предыдущего кадра между
+рендерами; это удобно для оверлеев или инкрементальной отрисовки. По
+умолчанию используется `True`.
+
+`Scene.render()` выбрасывает `RuntimeError`, если камера не установлена.
+
+## Камера
+
+```python
+camera = pyjet3d.Camera()
+camera.setPosition(0, 0, -500)
+camera.setRotation(0, 180, 0)      # градусы, X=pitch, Y=yaw, Z=roll
+camera.lookAt(0, 0, 0)              # удобная альтернатива ручному повороту
+camera.nearPlane = 32
+camera.farPlane = 4096
+camera.setFOV(60, scene.width)
+scene.setCamera(camera)
+```
+
+- `setFOV(fov, screen_width=320)` задаёт угол обзора в градусах и ширину,
+  используемую для масштаба проекции. Растеризатор применяет `screen_width`
+  к горизонтальной проекции; вертикальное покрытие зависит от соотношения
+  сторон фреймбуфера. Допустимый диапазон: `0 < fov < 180`.
+- `Scene.setCamera()` и `Scene.render()` поддерживают проекцию в соответствии
+  с шириной сцены. Можно вызвать `setFOV(60)`, а ширину подставит сцена.
+- `position` и `rotation` — свойства-кортежи, а также есть методы установки:
+  ```python
+  camera.position = (0, 0, -600)
+  camera.rotation = (0, 0, 0)
+  print(camera.position, camera.rotation, camera.fov)
+  ```
+- `lookAt()` задаёт yaw и pitch так, чтобы смотреть на точку мирового
+  пространства, и сбрасывает roll.
+- `Scene.setCamera()` хранит ссылку на камеру; держите камеру живой, пока
+  существует сцена. Привязка также автоматически продлевает ей жизнь, пока
+  жива сцена.
+
+Для камеры, смотрящей вдоль `+Z`, увеличение yaw поворачивает её в сторону
+`+X` (в зависимости от знаков в вашей сцене), а pitch наклоняет вверх или
+вниз. Если объект не виден, быстрее всего проверить `lookAt()` и камеру
+со стороны `-Z`.
+
+## Меши и порядок обхода вершин
+
+`Mesh` — набор вершин и треугольников, который копируется в сцену при
+добавлении:
+
+```python
+mesh = pyjet3d.Mesh(
+    [
+        (-100, -100, 0),
+        (100, -100, 0),
+        (100, 100, 0),
+        (-100, 100, 0),
+    ],
+    [(0, 1, 2), (0, 2, 3)],
+)
+
+mesh.setPosition(0, 0, 0)
+mesh.setRotation(0, 35, 0)    # градусы
+mesh.setScale(1.0, 1.0, 1.0)  # абсолютный локальный масштаб
+scene.addMesh(mesh, material)
+```
+
+Правила конструктора:
+
+- Нужно как минимум три вершины.
+- Если `indices` не передан или пуст, меш из трёх вершин становится одним
+  треугольником; больший меш триангулируется веером от вершины 0. Это удобно
+  для выпуклых многоугольников, но для сложной геометрии лучше задавать
+  индексы треугольников явно.
+- Индексы 16-битные; один меш поддерживает не более 65 536 вершин.
+- Индексы вне диапазона вызывают `ValueError`/`IndexError`, а не молчаливое
+  чтение неверной геометрии.
+
+Преобразования:
+
+- `setPosition(x, y, z)` задаёт позицию объекта.
+- `setRotation(x, y, z)` задаёт абсолютный поворот Эйлера в градусах.
+- `setScale(x, y, z)` масштабирует **исходные локальные вершины** и
+  пересчитывает плоские нормали. Масштаб абсолютный, а не накопительный:
+  повторный вызов с тем же значением даёт ту же геометрию.
+- `cullingMode` по умолчанию равен `CullingMode.CULL_BACKFACES`.
+- `blendMode` выбирает операцию смешивания для объекта.
+- `ignoreZBuffer` рисует без проверки глубины; `noWriteZBuffer` пишет цвет,
+  но не глубину; `enabled=False` пропускает объект.
+
+### Порядок обхода и отсечение
+
+Лицевая грань — **против часовой стрелки, если смотреть со стороны камеры**.
+Минимальный лицевой треугольник:
+
+```python
+scene.addMesh(
+    [(0, 120, 0), (120, -120, 0), (-120, -120, 0)],
+    material,
+)
+```
+
+Если меш не виден, возможно, порядок обхода вершин обратный. Для
+импортированной или двусторонней геометрии используйте:
+
+```python
+mesh.cullingMode = pyjet3d.CullingMode.NO_CULLING
+```
+
+`CULL_FRONTFACES` полезен, чтобы показать внутренность комнаты или полого
+объекта. Для плоских декалей, которые должны быть видны с обеих сторон,
+отсечение лучше отключить.
+
+`Scene.addMesh()` **копирует** геометрию меша в сцену. Изменение `Mesh` после
+добавления не перемещает и не пересвечивает копию в сцене. Для анимации
+преобразований создавайте новый меш и пересобирайте сцену (см.
+[Анимация](#анимация)). `Material` хранится по ссылке, а не копируется,
+поэтому изменения материала видны при следующих рендерах.
+
+## Материалы и затенение
+
+`Material.color` и `Scene.setBackcolor()` используют **RGB565**
+(`0xF800` — красный), а `Color` для источников света хранит 8-битные
+компоненты.
+
+```python
+# RGB565 из 8-битных каналов, если удобнее задавать цвет так.
+def rgb565(r, g, b):
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+material = pyjet3d.Material(rgb565(220, 60, 40))
+material.alpha = 255
+material.diffuse = 255
+material.specular = 0
+material.emissive = False
+material.shadingMode = pyjet3d.ShadingMode.FLAT
+```
+
+Прозрачность можно передать в конструктор:
+
+```python
+translucent = pyjet3d.Material(0xF800, 128)
+```
+
+Режимы затенения:
+
+| Режим | Назначение |
+| --- | --- |
+| `ShadingMode.FLAT` | Один цвет на треугольник. Быстро и хорошо для low-poly. |
+| `ShadingMode.GOURAUD` | Освещение считается в вершинах и интерполируется. |
+| `ShadingMode.PHONG` | Попиксельное освещение; самый гладкий результат. |
+| `ShadingMode.WIREFRAME` | Рисуются только рёбра треугольников. |
+| `ShadingMode.UNLIT` | Исходный цвет материала, освещение игнорируется. |
+| `ShadingMode.WATER_REFLECT` | Анимированная водная поверхность движка. |
+| `ShadingMode.ADDITIVE` | Аддитивное свечение/неон; освещение обходится. |
+
+Сборка Python не предоставляет текстуры и пользовательские шейдеры, поэтому
+видимый цвет поверхности задаётся `color`, если не используется специальный
+режим затенения. `emissive=True` и `UNLIT` — простые способы сделать яркий
+объект, не реагирующий на свет.
+
+Свойства `diffuse`, `specular`, `specularExponent`, `perspectiveCorrect`,
+`waterYBias` и `waterReflectionMaxY` доступны для совместимости с настройкой
+материалов движка. В обычных Python-сценах чаще всего нужны `color`, `alpha`,
+`emissive` и `shadingMode`.
+
+## Источники света
+
+Источники света создаются как Python-объекты и передаются сцене. Сцена
+хранит ссылки на них.
+
+```python
+sun = pyjet3d.DirectionalLight(
+    azimuth=225,
+    elevation=45,
+    r=255,
+    g=241,
+    b=214,
+    intensity=255,
+)
+scene.setDirectionalLight(sun)
+
+ambient = pyjet3d.AmbientLight(100, 104, 120)
+scene.setAmbientLight(ambient)
+
+# Сохраняется для пользовательского/нативного затенения; встроенные материалы
+# используют направленный и окружающий свет.
+lamp = pyjet3d.PointLight(0, 80, -250, 255, 180, 100, 0, 512)
+scene.addPointLight(lamp)
+```
+
+- `DirectionalLight(azimuth=225, elevation=45, r=255, g=255, b=255,
+  intensity=255)`: бесконечно удалённый свет. В `direction` хранится пара
+  `(azimuth, elevation, 0)` в градусах. Если присвоить `light.direction`
+  напрямую, вызовите `light.updateDirection(azimuth, elevation)`, чтобы
+  пересчитать производный вектор.
+- `AmbientLight(r=32, g=32, b=32)`: постоянная фоновая подсветка по каналам.
+- `PointLight(x, y, z, r=255, g=255, b=255, rangeMin=0, rangeMax=255)`:
+  значение точечного света в мировом пространстве с линейным затуханием между
+  диапазонами. `light.enabled = False` отключает его.
+
+Встроенное затенение с фиксированным конвейером в сборке Python использует
+направленный и окружающий свет. Объекты `PointLight` доступны и сохраняются
+через `Scene.addPointLight()`, но пока не освещают встроенные материалы; они
+предназначены для пользовательских/нативных расширений шейдеров.
+
+Освещение работает в режимах `FLAT` (для освещаемых материалов), `GOURAUD`
+и `PHONG`. Если направленного и окружающего света нет, поверхности рисуются
+с полной яркостью; окружающий свет даёт ровную цветную базовую подсветку.
+
+## Фреймбуфер и изображения
+
+Фреймбуфер имеет формат RGB565, по одному little-endian `uint16_t` на пиксель:
+
+```python
+raw = scene.get_framebuffer()
+assert len(raw) == scene.width * scene.height * 2
+pixel = scene.get_pixel(160, 120)  # целое значение RGB565
+print("0x%04X" % pixel)
+```
+
+`pyjet3d.framebuffer_to_rgb(raw, width, height)` преобразует его в упакованные
+RGB888-байты. Длина `raw` должна быть ровно `width * height * 2`.
+
+Запись PPM без сторонних библиотек:
+
+```python
+def save_ppm(path, scene):
+    rgb = pyjet3d.framebuffer_to_rgb(
+        scene.get_framebuffer(), scene.width, scene.height
+    )
+    with open(path, "wb") as out:
+        out.write(b"P6\n%d %d\n255\n" % (scene.width, scene.height))
+        out.write(rgb)
+```
+
+Или передать RGB-байты в Pillow:
+
+```python
+from PIL import Image
+
+rgb = pyjet3d.framebuffer_to_rgb(
+    scene.get_framebuffer(), scene.width, scene.height
+)
+Image.frombytes("RGB", (scene.width, scene.height), rgb).save("frame.png")
+```
+
+Полезные свойства и методы сцены:
+
+- `scene.width`, `scene.height`: размеры вывода.
+- `scene.pixel_format`: строка `"RGB565"`.
+- `scene.frame_counter`: количество завершённых рендеров.
+- `scene.last_frame_drawn_objects`: объекты, переданные в последнем кадре.
+- `scene.last_frame_drawn_triangles`: треугольники, переданные в последнем
+  кадре.
+- `scene.last_frame_rasterized_triangles`: треугольники, прошедшие отсечение
+  и дошедшие до растеризатора.
+- `scene.get_statistics()`: возвращает `(objects, triangles, vertices)` для
+  текущего содержимого сцены.
+
+## Анимация
+
+Поскольку `Scene.addMesh()` копирует геометрию, преобразования объекта
+фиксируются при добавлении. Простейший цикл анимации пересобирает небольшую
+сцену каждый кадр:
+
+```python
+for frame in range(60):
+    scene = pyjet3d.Scene(320, 240)
+
+    camera = pyjet3d.Camera()
+    camera.setPosition(0, 0, -700)
+    camera.setFOV(55, scene.width)
+    camera.nearPlane = 32
+    camera.farPlane = 4096
+    camera.lookAt(0, 0, 0)
+    scene.setCamera(camera)
+
+    light = pyjet3d.DirectionalLight(azimuth=225, elevation=45)
+    scene.setDirectionalLight(light)
+    scene.setAmbientLight(pyjet3d.AmbientLight(80, 84, 100))
+
+    material = pyjet3d.Material(0xF800)
+    material.shadingMode = pyjet3d.ShadingMode.PHONG
+    mesh = make_cube()  # возвращает pyjet3d.Mesh
+    mesh.setRotation(0, frame * 6, 0)
+    scene.addMesh(mesh, material)
+
+    scene.render()
+    save_ppm("frame_%03d.ppm" % frame, scene)
+```
+
+Для low-poly сцен, на которые рассчитан этот API, пересборка дешёвая. Если
+движется только камера, сцену можно сохранить и менять камеру — сцена хранит
+ссылку на неё.
+
+Полный пример последовательности кадров с вращающимся кубом находится в
+`examples/python/orbit.py`.
+
+## Справочник API
+
+### `pyjet3d.Scene`
+
+```python
+Scene(width=320, height=240)
+```
+
+| Элемент | Описание |
+| --- | --- |
+| `width`, `height` | Только для чтения; размеры вывода в пикселях. |
+| `pixel_format` | Только для чтения; всегда `"RGB565"`. |
+| `setCamera(camera)` | Установить активную камеру. Сцена хранит ссылку. |
+| `setDirectionalLight(light)` | Установить единственный направленный свет (или заменить его). |
+| `setAmbientLight(light)` | Установить единственный окружающий свет. |
+| `addPointLight(light)` | Сохранить объект точечного света для пользовательского/нативного затенения; сцена хранит ссылку. |
+| `setBackcolor(color)` | Задать цвет очистки в RGB565. |
+| `setClearBuffer(clear)` | Включить/выключить очистку цветового буфера при рендере. |
+| `addMesh(mesh, material)` | Скопировать `Mesh` в сцену с материалом. |
+| `addMesh(vertices, material, indices=[])` | Создать и добавить меш из последовательностей Python. |
+| `render()` | Отрисовать один кадр. Выбрасывает исключение, если камера не задана. |
+| `get_framebuffer()` | Вернуть `width * height * 2` байт little-endian RGB565. |
+| `get_pixel(x, y)` | Вернуть одно значение RGB565; вне диапазона — `IndexError`. |
+| `get_statistics()` | Вернуть `(objects, triangles, vertices)`. |
+| `frame_counter`, `last_frame_*` | Только для чтения; счётчики кадров и отправленной геометрии. |
+
+### `pyjet3d.Camera`
+
+```python
+Camera()
+```
+
+| Элемент | Описание |
+| --- | --- |
+| `position` | Свойство-кортеж `(x, y, z)`. |
+| `rotation` | Кортеж `(x, y, z)` углов Эйлера в градусах. |
+| `fov` | Только для чтения; текущий FOV в градусах. |
+| `nearPlane`, `farPlane` | Расстояния отсечения; целые числа, доступны для записи. |
+| `setPosition(x, y, z)` | Задать позицию камеры. |
+| `setRotation(x, y, z)` | Задать абсолютный поворот Эйлера в градусах. |
+| `lookAt(x, y, z)` | Направить камеру на точку мира и сбросить roll. |
+| `setFOV(fov, screen_width=320)` | Задать FOV и ширину проекции. |
+
+### `pyjet3d.Mesh`
+
+```python
+Mesh(vertices, indices=[])
+```
+
+| Элемент | Описание |
+| --- | --- |
+| `setPosition(x, y, z)` | Задать позицию объекта. |
+| `setRotation(x, y, z)` | Задать абсолютный поворот Эйлера в градусах. |
+| `setScale(x, y, z)` | Запечь абсолютный локальный масштаб в вершины. |
+| `cullingMode` | `CullingMode.CULL_BACKFACES` (по умолчанию), `CULL_FRONTFACES` или `NO_CULLING`. |
+| `blendMode` | Одно из значений `BlendMode`. |
+| `ignoreZBuffer` | При `True` рисовать без проверки глубины. |
+| `noWriteZBuffer` | При `True` не обновлять буфер глубины. |
+| `enabled` | При `False` пропустить меш. |
+
+### `pyjet3d.Material`
+
+```python
+Material(color=0xFFFF)
+Material(color, alpha)
+```
+
+| Элемент | Описание |
+| --- | --- |
+| `color` | Базовый цвет RGB565. |
+| `alpha` | 0–255; 255 — непрозрачный. |
+| `diffuse`, `specular` | Коэффициенты освещения (0–255). |
+| `emissive` | Обойти освещение и использовать исходный цвет. |
+| `specularExponent` | Управление бликом для `PHONG`. |
+| `perspectiveCorrect` | Опция текстурных координат; важна только для нативных текстур. |
+| `waterYBias`, `waterReflectionMaxY` | Опции для `WATER_REFLECT`. |
+| `shadingMode` | Значение `ShadingMode`. |
+
+### Свет и небольшие типы значений
+
+| Тип | Описание |
+| --- | --- |
+| `DirectionalLight(azimuth=225, elevation=45, r=255, g=255, b=255, intensity=255)` | Бесконечно удалённый свет. `direction`, `color`, `intensity`, `updateDirection()`. |
+| `AmbientLight(r=32, g=32, b=32)` | Постоянная фоновая составляющая. `color`. |
+| `PointLight(x, y, z, r=255, g=255, b=255, rangeMin=0, rangeMax=255)` | Значение точечного света для пользовательского/нативного затенения. `position`, `color`, `rangeMin`, `rangeMax`, `enabled`. |
+| `Color(r=255, g=255, b=255)` | 8-битный RGB, используется источниками света. |
+| `Vector3(x=0, y=0, z=0)` | Целочисленный вектор мирового пространства. |
+
+### Перечисления
+
+```python
+pyjet3d.ShadingMode.FLAT
+pyjet3d.ShadingMode.GOURAUD
+pyjet3d.ShadingMode.PHONG
+pyjet3d.ShadingMode.WIREFRAME
+pyjet3d.ShadingMode.UNLIT
+pyjet3d.ShadingMode.WATER_REFLECT
+pyjet3d.ShadingMode.ADDITIVE
+
+pyjet3d.CullingMode.CULL_BACKFACES
+pyjet3d.CullingMode.CULL_FRONTFACES
+pyjet3d.CullingMode.NO_CULLING
+
+pyjet3d.BlendMode.BLEND_REPLACE
+pyjet3d.BlendMode.BLEND_ADD
+pyjet3d.BlendMode.BLEND_SUBTRACT
+pyjet3d.BlendMode.BLEND_SCALE
+pyjet3d.BlendMode.BLEND_AVERAGE
+pyjet3d.BlendMode.BLEND_XOR
+```
+
+Значения перечислений также доступны напрямую из модуля, потому что они
+экспортированы через `export_values()`; форма с пространством имён понятнее
+в коде приложения.
+
+## Ограничения и устранение проблем
+
+- **Ничего не видно:** проверьте позицию камеры и плоскости отсечения,
+  порядок обхода вершин и цвет материала. Попробуйте
+  `mesh.cullingMode = pyjet3d.CullingMode.NO_CULLING`.
+- **Изображение перевёрнуто или отражено:** `get_pixel(x, 0)` — верхняя
+  строка; записывайте PPM/Pillow в построчном порядке, как в примерах.
+- **Меш не двигается:** `Scene.addMesh()` копирует меш. После изменения
+  преобразования добавьте новый меш или пересоберите сцену.
+- **Изменения материала не видны:** материалы хранятся по ссылке, но после
+  изменения нужен ещё один вызов `render()`.
+- **Всё тёмное:** добавьте `AmbientLight` и/или направленный свет и проверьте,
+  что свет не находится за всеми видимыми гранями. `UNLIT` или
+  `emissive=True` обходят освещение. Точечные источники пока не влияют на
+  встроенный путь затенения.
+- **Большая сцена обрезается:** увеличьте `camera.farPlane`; для близких
+  объектов уменьшите `nearPlane`. Помните, что это программный растеризатор,
+  и очень большие фреймбуферы обрабатываются медленно.
+- **Нет текстур или спрайтов:** это возможности нативного движка C++, пока не
+  доступные из Python.
+
+## Демки
+
+В репозитории есть демки на Python без внешних зависимостей:
+
+| Демка | Что показывает |
+| --- | --- |
+| [`examples/python/triangle.py`](../examples/python/triangle.py) | Минимальный рендер и сохранение PPM. |
+| [`examples/python/lit_cube.py`](../examples/python/lit_cube.py) | Куб с проверкой глубины, камерой, направленным и окружающим светом. |
+| [`examples/python/orbit.py`](../examples/python/orbit.py) | Короткая последовательность кадров с вращающимся кубом. |
+
+Запуск из корня репозитория:
+
+```bash
+python examples/python/triangle.py
+python examples/python/lit_cube.py --output lit_cube.ppm
+python examples/python/orbit.py --frames 24 --output-dir orbit_frames
+```
+
+Демкам нужны только `pyjet3d` и стандартная библиотека. Параметры описаны в
+[`examples/python/README_RU.md`](../examples/python/README_RU.md), английская
+версия — в [`README.md`](../examples/python/README.md).
+
+## Документация движка
+
+Пакет Python — тонкая обёртка над движком Jet. Нативная документация полезна
+для понимания растеризатора и расширения привязок:
+
+- [Официальный справочник API](https://cubecoders.github.io/Jet/)
+- [Производительность на ESP32](ESP32Performance.md)
+- [Инстансинг](instancing.md)
+- [Сплошные прямоугольники](SolidRectangles.md)
+- [Тайловые текстуры](TiledTextures.md)
+
+Jet развивает [CubeCoders](https://cubecoders.com). Он распространяется по
+лицензии MIT; см. [`LICENSE`](../LICENSE).

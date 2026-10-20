@@ -33,6 +33,9 @@
 - `version.txt` as the single release-version source.  A change to it on
   `main` builds wheels, creates a GitHub release with the wheels attached, and
   publishes to PyPI.
+- Python-focused English and Russian documentation (`README.md`,
+  `README_RU.md`, `docs/Python.md`, `docs/Python_RU.md`) and three runnable
+  demos under `examples/python/`.
 
 ### Changed
 

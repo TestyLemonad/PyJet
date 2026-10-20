@@ -1,6 +1,10 @@
 include LICENSE
 include README.md
+include README_RU.md
 include CHANGELOG.md
 include version.txt
+include Logo.png
 recursive-include src *.hpp *.h
 recursive-include tests *.py
+recursive-include docs *.md
+recursive-include examples *.py *.md
