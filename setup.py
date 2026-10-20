@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -5,6 +6,19 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
+
+
+def read_version():
+    """Read the canonical release version from version.txt."""
+    raw = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
+    match = re.fullmatch(
+        r"v?(\d+\.\d+\.\d+(?:[.-][0-9A-Za-z.-]+)?)", raw
+    )
+    if not match:
+        raise RuntimeError(
+            "version.txt must contain a single version such as 'v0.3.0'"
+        )
+    return match.group(1)
 
 # Keep the extension source list in sync with the engine automatically.  The
 # two sample/demo translation units are intentionally excluded: they are not
@@ -33,7 +47,7 @@ ext_modules = [
 
 setup(
     name="pyjet3d",
-    version="0.3.0",
+    version=read_version(),
     author="TestyLemonad",
     description="Python bindings for the Jet 3D software rasteriser",
     package_dir={"": "src"},

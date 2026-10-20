@@ -1,14 +1,56 @@
-name: Build and publish PyJet to PyPI
+name: Build and release PyJet wheels
 
 on:
   push:
-    tags:
-      - 'v*'
-  workflow_dispatch: # Позволяет запускать воркфлоу вручную из вкладки Actions!
+    branches:
+      - main
+    paths:
+      - version.txt
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: pyjet-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Validate version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version.txt
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t lines < <(grep -v '^[[:space:]]*$' version.txt || true)
+          if [ "${#lines[@]}" -ne 1 ]; then
+            echo "::error file=version.txt::version.txt must contain exactly one version line"
+            exit 1
+          fi
+
+          tag="${lines[0]//$'\r'/}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error file=version.txt::expected a tag such as v0.3.0, got '$tag'"
+            exit 1
+          fi
+
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag (package version $version)"
+
   build_wheels:
     name: Build wheels on ${{ matrix.os }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,13 +63,11 @@ jobs:
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2.1
         env:
-          # Build every supported CPython version explicitly.  This avoids
+          # Build every supported CPython version explicitly. This avoids
           # accidentally picking up free-threaded or pre-release identifiers.
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-* cp314-*"
           # Skip PyPy and 32-bit builds.
           CIBW_SKIP: "pp* *-win32 *-manylinux_i686 *-musllinux_i686"
-          # Для macOS собираем и x86_64, и arm64 (опционально, раскомментируй при необходимости)
-          # CIBW_ARCHS_MACOS: "x86_64 arm64"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -36,6 +76,7 @@ jobs:
 
   test_sdist:
     name: Build and test source distribution
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,11 +94,52 @@ jobs:
       - name: Run Python tests against installed sdist
         run: pytest tests
 
-  publish:
-    needs: [build_wheels, test_sdist]
+  github_release:
+    name: Create GitHub release
+    needs: [prepare, build_wheels, test_sdist]
     runs-on: ubuntu-latest
-    # Публикуем на PyPI только если это был запуск по тегу v*
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    # Only publish from the default branch, even if someone runs the workflow
+    # manually from a feature branch.
+    if: github.ref_name == github.event.repository.default_branch
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cibuildwheel-wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! compgen -G "dist/*.whl" >/dev/null; then
+            echo "::error::No wheel files were downloaded"
+            exit 1
+          fi
+
+          echo "Wheels to attach:"
+          ls -lh dist/*.whl
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.whl --clobber
+          else
+            gh release create "$TAG" dist/*.whl \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+
+  publish_pypi:
+    name: Publish to PyPI
+    needs: [prepare, github_release]
+    runs-on: ubuntu-latest
+    if: github.ref_name == github.event.repository.default_branch
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -65,9 +147,9 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish to PyPI
+      - name: Publish wheels to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
+          packages-dir: dist
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true

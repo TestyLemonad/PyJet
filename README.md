@@ -16,6 +16,14 @@ rasteriser written in C++17.  The PyPI package is `pyjet3d` and the import is
 pip install pyjet3d
 ```
 
+### Releasing
+
+`version.txt` in the repository root is the single source of truth for the
+release version.  It contains one line such as `v0.3.0`.  Pushing a change to
+that file on `main` starts the release workflow: it builds the wheels, creates
+or updates the matching GitHub release with the wheels attached, and publishes
+the wheels to PyPI.
+
 ### Quick start
 
 ```python

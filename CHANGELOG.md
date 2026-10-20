@@ -30,6 +30,9 @@
 - `Scene.get_pixel()`, dimensions, frame counters, statistics and backcolor.
 - `pyjet3d.framebuffer_to_rgb()` helper.
 - CI wheel tests via `cibuildwheel`'s `test-command`.
+- `version.txt` as the single release-version source.  A change to it on
+  `main` builds wheels, creates a GitHub release with the wheels attached, and
+  publishes to PyPI.
 
 ### Changed
 

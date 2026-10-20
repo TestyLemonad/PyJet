@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pyjet3d
 
 
@@ -5,8 +7,12 @@ def test_primary_package_and_version():
     assert pyjet3d.Scene is not None
     assert pyjet3d.Camera is not None
     assert pyjet3d.Mesh is not None
-    assert pyjet3d.__version__ == "0.3.0"
     assert pyjet3d.PIXEL_FORMAT == "RGB565"
+
+    version_file = Path(__file__).resolve().parents[1] / "version.txt"
+    expected = version_file.read_text(encoding="utf-8").strip()
+    assert expected.startswith("v")
+    assert pyjet3d.__version__ == expected[1:]
 
 
 def test_culling_modes_are_exposed():
