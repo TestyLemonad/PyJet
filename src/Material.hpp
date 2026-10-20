@@ -45,7 +45,7 @@ public:
                                       ///< Fade to reflected sky over the preceding 24 pixels, preventing
                                       ///< shifted reflections from feeding water back into itself. Requires a sky gradient.
     ShadingMode shadingMode = ShadingMode::FLAT; ///< Shading model.
-    char* name;                 ///< Optional name; used for `usemtl` matching in OBJ loading.
+    char* name = nullptr;       ///< Optional name; used for `usemtl` matching in OBJ loading.
 
     /// @brief Construct a material.
     /// @param color Base colour in RGB565.

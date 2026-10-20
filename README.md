@@ -2,41 +2,113 @@
   <img src="Logo.png" alt="Jet logo" width="512px">
 </p>
 
-# Jet 
+# PyJet
 
-## Python package quick start
+Python bindings for **Jet**, a dependency-free fixed-function 3D software
+rasteriser written in C++17.  The PyPI package is `pyjet3d` and the import is
+`pyjet3d`.
+
+> **0.3.0 migration:** the primary import was renamed from `pyjet` to
+> `pyjet3d` to avoid a top-level package collision with the unrelated
+> `pyjet` project on PyPI.  Change `import pyjet` to `import pyjet3d`.
 
 ```bash
 pip install pyjet3d
 ```
 
+### Quick start
+
 ```python
-import pyjet
-import pyjet3d  # alias module
+import pyjet3d
+
+scene = pyjet3d.Scene(320, 240)
+
+camera = pyjet3d.Camera()
+camera.setPosition(0, 0, -500)
+camera.setFOV(70)
+scene.setCamera(camera)          # also adapts FOV to the scene width
+
+material = pyjet3d.Material(0xF800)
+material.shadingMode = pyjet3d.ShadingMode.FLAT
+
+# Counter-clockwise winding = front face under the default CULL_BACKFACES.
+scene.addMesh(
+    [(0, 120, 0), (120, -120, 0), (-120, -120, 0)],
+    material,
+)
+scene.render()
+
+framebuffer = scene.get_framebuffer()
+assert len(framebuffer) == scene.width * scene.height * 2
+
+# Optional: RGB565 -> RGB888, suitable for a PPM/Pillow image.
+rgb = pyjet3d.framebuffer_to_rgb(framebuffer, scene.width, scene.height)
+with open("frame.ppm", "wb") as out:
+    out.write(b"P6\n%d %d\n255\n" % (scene.width, scene.height))
+    out.write(rgb)
 ```
 
-The PyPI package name is `pyjet3d`. The primary import is `pyjet`, and
-`pyjet3d` is provided as an alias (`pyjet.Scene is pyjet3d.Scene`).
+The framebuffer is little-endian RGB565, one `uint16_t` per pixel.  Use
+`Scene.get_pixel(x, y)` for a single value.  The Python build enables a full
+resolution colour buffer, a depth buffer and directional/ambient lighting.
 
-### Python triangle example
+### Lighting and camera
 
 ```python
-import pyjet
+import pyjet3d
 
-scene = pyjet.Scene(320, 240)
-cam = pyjet.Camera()
+scene = pyjet3d.Scene(640, 480)
+cam = pyjet3d.Camera()
 cam.setPosition(0, 0, -500)
-cam.setFOV(70)
+cam.setRotation(0, 0, 0)
+cam.nearPlane = 32
+cam.farPlane = 4096
+cam.setFOV(60, scene.width)
 scene.setCamera(cam)
 
-mat = pyjet.Material(0xF800)
-mat.shadingMode = pyjet.ShadingMode.FLAT
-scene.addMesh([(0, 120, 0), (-120, -120, 0), (120, -120, 0)], mat)
-scene.render()
+scene.setDirectionalLight(
+    pyjet3d.DirectionalLight(azimuth=225, elevation=45,
+                             r=255, g=240, b=220, intensity=255)
+)
+scene.setAmbientLight(pyjet3d.AmbientLight(32, 32, 48))
+
+material = pyjet3d.Material(0xF800)
+material.shadingMode = pyjet3d.ShadingMode.GOURAUD
 ```
 
-**Jet** is a dependency-free, fixed-function 3D software rasteriser written in
-C++17. It targets embedded hardware with limited CPU and memory, including
+### Meshes and culling
+
+`Mesh` is a static mesh builder.  Transforms are applied to the mesh before it
+is added; `Scene.addMesh()` copies the geometry into the scene.
+
+```python
+mesh = pyjet3d.Mesh(
+    [(0, 100, 0), (100, -100, 0), (-100, -100, 0)],
+    [(0, 1, 2)],
+)
+mesh.setPosition(0, 0, 0)
+mesh.setRotation(0, 0, 45)
+mesh.setScale(1.5, 1.5, 1.5)
+mesh.cullingMode = pyjet3d.CullingMode.NO_CULLING   # double-sided
+scene.addMesh(mesh, material)
+```
+
+`setScale()` bakes an absolute scale into the local vertices.  The default
+culling mode is `CULL_BACKFACES`; if your geometry appears invisible, check its
+triangle winding or use `NO_CULLING`.
+
+### Current Python API scope
+
+- `Scene`: width/height, camera, directional/ambient/point lights, backcolor,
+  mesh submission, RGB565 framebuffer, pixel access, statistics.
+- `Camera`: position, rotation, look-at, FOV, near/far planes.
+- `Material`: RGB565 colour, alpha, diffuse/specular, shading mode.
+- `Mesh`: vertices/indices, position, rotation, baked scale, culling and blend
+  modes.
+- Textures and custom shaders are available in the C++ engine but are not yet
+  exposed by the Python bindings.
+
+**Jet** targets embedded hardware with limited CPU and memory, including
 ESP32 and STM32, and also runs on desktop PCs and Raspberry Pi.
 
 Jet uses integer arithmetic in the rasterisation hot path and native 16-bit

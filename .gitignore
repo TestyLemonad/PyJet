@@ -1,8 +1,20 @@
 # Build outputs
 build/
 build-*/
+dist/
+wheelhouse/
 *.user
 .vs/
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
 
 # Generated docs
 src/docs/html/
