@@ -49,6 +49,190 @@ size_t checked_product(size_t a, size_t b, const char* what)
     return a * b;
 }
 
+// Return the unit face normal in the engine's fixed-point convention.
+// This mirrors Object::computeFlatNormals() but does not touch vertices.
+Vector3 faceNormal(const Object& object, const Object::Triangle& tri)
+{
+    const Object::Vertex& a = object.vertices[tri.v1];
+    const Object::Vertex& b = object.vertices[tri.v2];
+    const Object::Vertex& c = object.vertices[tri.v3];
+
+    // Use double for the cross product so very large coordinates cannot
+    // overflow the int64 intermediate used by the native face-normal helper.
+    const double ux = (double)b.position.x - a.position.x;
+    const double uy = (double)b.position.y - a.position.y;
+    const double uz = (double)b.position.z - a.position.z;
+    const double vx = (double)c.position.x - a.position.x;
+    const double vy = (double)c.position.y - a.position.y;
+    const double vz = (double)c.position.z - a.position.z;
+
+    const double nx = uy * vz - uz * vy;
+    const double ny = uz * vx - ux * vz;
+    const double nz = ux * vy - uy * vx;
+    const double mag = std::sqrt(nx * nx + ny * ny + nz * nz);
+    if (!(mag > 0.0)) {
+        return Vector3(0, 0, 0);
+    }
+
+    const double scale = (double)FIXED_POINT_SCALE / mag;
+    return Vector3(static_cast<int32_t>(std::llround(nx * scale)),
+                   static_cast<int32_t>(std::llround(ny * scale)),
+                   static_cast<int32_t>(std::llround(nz * scale)));
+}
+
+// A Mesh may use shared vertices (the natural way to author a cube).  Simply
+// writing a per-triangle normal into every referenced vertex makes the last
+// triangle win, which silently corrupts FLAT/GOURAUD/PHONG lighting.  Split a
+// vertex only when its incident triangles have different normals, keeping
+// coplanar triangles and flat surfaces indexed and compact.
+void rebuildFlatNormals(Object& object, std::vector<Vector3>& basePositions)
+{
+    if (basePositions.size() != object.vertices.size()) {
+        throw std::runtime_error("Mesh vertex cache is inconsistent");
+    }
+
+    struct NormalSlot {
+        Vector3 normal;
+        uint16_t index;
+    };
+
+    std::vector<std::vector<NormalSlot>> slots(object.vertices.size());
+    std::vector<Object::Vertex> newVertices;
+    std::vector<Vector3> newBasePositions;
+    newVertices.reserve(object.vertices.size());
+    newBasePositions.reserve(object.vertices.size());
+
+    for (Object::Triangle& tri : object.triangles) {
+        const Vector3 normal = faceNormal(object, tri);
+        const uint16_t source[3] = {tri.v1, tri.v2, tri.v3};
+        uint16_t result[3] = {0, 0, 0};
+
+        for (int corner = 0; corner < 3; ++corner) {
+            const uint16_t original = source[corner];
+            // size_t rather than uint16_t: 65535 is a valid vertex index and
+            // must not double as a "not found" sentinel.
+            size_t found = slots[original].size();
+            for (size_t slotIndex = 0; slotIndex < slots[original].size();
+                 ++slotIndex) {
+                const NormalSlot& slot = slots[original][slotIndex];
+                if (slot.normal.x == normal.x &&
+                    slot.normal.y == normal.y &&
+                    slot.normal.z == normal.z) {
+                    found = slotIndex;
+                    break;
+                }
+            }
+
+            if (found == slots[original].size()) {
+                if (newVertices.size() >= kMaxMeshVertices) {
+                    throw std::invalid_argument(
+                        "Mesh expands to more than 65536 vertices after "
+                        "per-face normal splitting");
+                }
+                const uint16_t newIndex =
+                    static_cast<uint16_t>(newVertices.size());
+                Object::Vertex vertex = object.vertices[original];
+                vertex.normal = normal;
+                newVertices.push_back(vertex);
+                newBasePositions.push_back(basePositions[original]);
+                slots[original].push_back({normal, newIndex});
+                result[corner] = newIndex;
+            } else {
+                result[corner] = slots[original][found].index;
+            }
+        }
+
+        tri.v1 = result[0];
+        tri.v2 = result[1];
+        tri.v3 = result[2];
+    }
+
+    object.vertices = std::move(newVertices);
+    basePositions = std::move(newBasePositions);
+    object.invalidatePositions();
+}
+
+std::vector<Vector3> readNormals(
+    const std::vector<std::array<float, 3>>& normals,
+    size_t expected)
+{
+    if (normals.empty()) {
+        return {};
+    }
+    if (normals.size() != expected) {
+        throw std::invalid_argument(
+            "normals must contain one normal per vertex");
+    }
+
+    std::vector<Vector3> result;
+    result.reserve(normals.size());
+    for (const auto& normal : normals) {
+        const double x = normal[0];
+        const double y = normal[1];
+        const double z = normal[2];
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            throw std::invalid_argument("vertex normals must be finite");
+        }
+
+        const double length = std::sqrt(x * x + y * y + z * z);
+        if (!std::isfinite(length)) {
+            throw std::invalid_argument("vertex normals are too large");
+        }
+        if (!(length > 1e-12)) {
+            throw std::invalid_argument("vertex normals must be non-zero");
+        }
+
+        const double scale = (double)FIXED_POINT_SCALE / length;
+        result.emplace_back(
+            static_cast<int32_t>(std::llround(x * scale)),
+            static_cast<int32_t>(std::llround(y * scale)),
+            static_cast<int32_t>(std::llround(z * scale)));
+    }
+    return result;
+}
+
+// Inverse-transpose is the correct normal transform for a non-uniform scale.
+// Custom normals are authored in the unscaled local frame, so re-apply it
+// whenever setScale() changes the vertices.
+void applyScaledCustomNormals(
+    Object& object,
+    const std::vector<Vector3>& baseNormals,
+    float sx, float sy, float sz)
+{
+    if (baseNormals.size() != object.vertices.size()) {
+        throw std::runtime_error("Mesh normal cache is inconsistent");
+    }
+    if (sx == 0.0f || sy == 0.0f || sz == 0.0f) {
+        throw std::invalid_argument(
+            "Mesh scale components must be non-zero when custom normals are used");
+    }
+
+    for (size_t i = 0; i < baseNormals.size(); ++i) {
+        const Vector3& base = baseNormals[i];
+        const double x = (double)base.x / sx;
+        const double y = (double)base.y / sy;
+        const double z = (double)base.z / sz;
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+            throw std::invalid_argument(
+                "Mesh scale is too small for the authored normals");
+        }
+        const double length = std::sqrt(x * x + y * y + z * z);
+        if (!std::isfinite(length)) {
+            throw std::invalid_argument(
+                "Mesh scale is too small for the authored normals");
+        }
+        if (!(length > 0.0)) {
+            object.vertices[i].normal = base;
+            continue;
+        }
+        const double scale = (double)FIXED_POINT_SCALE / length;
+        object.vertices[i].normal.assign(
+            static_cast<int32_t>(std::llround(x * scale)),
+            static_cast<int32_t>(std::llround(y * scale)),
+            static_cast<int32_t>(std::llround(z * scale)));
+    }
+}
+
 // Owns the framebuffer, depth buffer and all C++ objects referenced by the
 // Python Scene.  Buffers are value-initialised: get_framebuffer() must never
 // expose uninitialised heap memory.
@@ -101,10 +285,13 @@ struct PySceneWrapper {
 struct PyMeshWrapper {
     Object object;
     std::vector<Vector3> basePositions;
+    std::vector<Vector3> baseNormals;
+    bool customNormals = false;
 
     PyMeshWrapper(
         const std::vector<std::array<float, 3>>& vertices,
-        const std::vector<std::array<uint16_t, 3>>& triangles)
+        const std::vector<std::array<uint16_t, 3>>& triangles,
+        const std::vector<std::array<float, 3>>& normals = {})
     {
         if (vertices.empty()) {
             throw std::invalid_argument("Mesh requires at least 3 vertices");
@@ -153,7 +340,16 @@ struct PyMeshWrapper {
             }
         }
 
-        object.computeFlatNormals();
+        baseNormals = readNormals(normals, object.vertices.size());
+        if (!baseNormals.empty()) {
+            customNormals = true;
+            for (size_t i = 0; i < object.vertices.size(); ++i) {
+                object.vertices[i].normal = baseNormals[i];
+            }
+            object.invalidatePositions();
+        } else {
+            rebuildFlatNormals(object, basePositions);
+        }
         object.calculateBoundingBox();
     }
 
@@ -184,6 +380,11 @@ struct PyMeshWrapper {
         if (basePositions.size() != object.vertices.size()) {
             throw std::runtime_error("Mesh vertex cache is inconsistent");
         }
+        if (customNormals && (x == 0.0f || y == 0.0f || z == 0.0f)) {
+            throw std::invalid_argument(
+                "Mesh scale components must be non-zero when custom normals "
+                "are used");
+        }
 
         for (size_t i = 0; i < basePositions.size(); ++i) {
             const Vector3& base = basePositions[i];
@@ -194,7 +395,13 @@ struct PyMeshWrapper {
         }
 
         object.invalidatePositions();
-        object.computeFlatNormals();
+        if (customNormals) {
+            applyScaledCustomNormals(object, baseNormals, x, y, z);
+        } else {
+            // The mesh was already split per unique face normal on creation,
+            // so re-evaluating the face normals preserves the same topology.
+            object.computeFlatNormals();
+        }
         object.calculateBoundingBox();
     }
 
@@ -359,14 +566,22 @@ PYBIND11_MODULE(_pyjet, m)
     py::class_<PyMeshWrapper>(m, "Mesh")
         .def(
             py::init<const std::vector<std::array<float, 3>>&,
-                     const std::vector<std::array<uint16_t, 3>>&>(),
+                     const std::vector<std::array<uint16_t, 3>>&,
+                     const std::vector<std::array<float, 3>>&>(),
             py::arg("vertices"),
             py::arg("indices") = std::vector<std::array<uint16_t, 3>>{},
+            py::arg("normals") = std::vector<std::array<float, 3>>{},
             R"pbdoc(
-Create mesh geometry from vertex positions and optional triangle indices.
+Create mesh geometry from vertex positions, optional triangle indices and
+optional per-vertex normals.
 
 Vertices use a counter-clockwise winding order for front faces.  Use
 ``mesh.cullingMode = pyjet3d.CullingMode.NO_CULLING`` for double-sided meshes.
+
+If ``normals`` is omitted, normals are computed per face.  Shared vertices
+with different face normals are split automatically, so FLAT/GOURAUD/PHONG
+lighting stays predictable for indexed meshes such as a cube.  Supplying one
+normal per vertex enables smooth GOURAUD/PHONG shading.
 )pbdoc")
         .def("setPosition", &PyMeshWrapper::setPosition,
              py::arg("x"), py::arg("y"), py::arg("z"))
@@ -429,7 +644,15 @@ Vertices use a counter-clockwise winding order for front faces.  Use
              py::arg("r") = 32, py::arg("g") = 32, py::arg("b") = 32)
         .def_readwrite("color", &AmbientLight::color);
 
-    py::class_<PointLight>(m, "PointLight")
+    py::class_<PointLight>(m, "PointLight", R"pbdoc(
+A world-space diffuse point light.
+
+The built-in FLAT, GOURAUD and PHONG paths evaluate enabled point lights.
+Intensity fades linearly from full brightness at ``rangeMin`` to zero at
+``rangeMax``.  When ``rangeMax <= rangeMin`` (for example both set to zero)
+the light has no distance attenuation.  Point lights add a range calculation
+per shaded sample, so use a small number of them in software-rendered scenes.
+)pbdoc")
         .def(py::init([](int x, int y, int z,
                          int r, int g, int b,
                          int rangeMin, int rangeMax) {
@@ -525,12 +748,14 @@ Vertices use a counter-clockwise winding order for front faces.  Use
              [](PySceneWrapper& self,
                 const std::vector<std::array<float, 3>>& vertices,
                 Material& material,
-                const std::vector<std::array<uint16_t, 3>>& indices) {
-                 PyMeshWrapper mesh(vertices, indices);
+                const std::vector<std::array<uint16_t, 3>>& indices,
+                const std::vector<std::array<float, 3>>& normals) {
+                 PyMeshWrapper mesh(vertices, indices, normals);
                  add_owned_mesh(self, mesh.object, material);
              },
              py::arg("vertices"), py::arg("material"),
              py::arg("indices") = std::vector<std::array<uint16_t, 3>>{},
+             py::arg("normals") = std::vector<std::array<float, 3>>{},
              py::keep_alive<1, 3>(),
              R"pbdoc(
 Add a mesh directly from Python lists.
@@ -542,7 +767,8 @@ The triangle winding is counter-clockwise for front faces.  For example:
         material,
     )
 
-The scene keeps the material alive.
+Pass ``indices`` to share vertices and ``normals`` (one per vertex) for
+smooth shading.  The scene keeps the material alive.
 )pbdoc")
         .def("render",
              [](PySceneWrapper& self) {

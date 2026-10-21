@@ -17,6 +17,8 @@ struct Color {
 /// `direction` is interpreted as integer-degree (azimuth, elevation) pair
 /// in `direction.x` and `direction.y`; `worldLightDir` and `lightDir` are
 /// the derived unit-length vectors in world and view space respectively.
+/// `color` tints the directional diffuse/specular contribution per channel and
+/// `intensity` scales it; `FLAT`, `GOURAUD` and `PHONG` all use both values.
 class DirectionalLight {
 public:
     Vector3 direction;          ///< Source angles (x=azimuth deg, y=elevation deg).
@@ -45,6 +47,11 @@ private:
 };
 
 /// @brief Point light with a linear falloff between rangeMin and rangeMax.
+///
+/// When `JET_POINT_LIGHTS` is enabled, the built-in lit shaders evaluate point
+/// lights as diffuse lights.  Set `rangeMax <= rangeMin` (for example both to
+/// zero) to disable distance attenuation; `enabled = false` removes the light
+/// from the frame.
 class PointLight {
 public:
     Vector3 position;           ///< World-space position.
@@ -59,6 +66,16 @@ public:
     /// @param rangeMin Distance at which the light is full intensity.
     /// @param rangeMax Distance at which the light fades to zero.
     PointLight(Vector3 position, Color color, uint16_t rangeMin = 0, uint16_t rangeMax = 255);
+};
+
+/// @brief Point light transformed into camera/view space for one frame.
+///
+/// Scene fills this once per frame and the rasterizer samples it per pixel.
+struct PointLightView {
+    Vector3 position;           ///< Camera-space position.
+    Color color;                ///< Light colour.
+    uint16_t rangeMin;          ///< Full-intensity radius in world units.
+    uint16_t rangeMax;          ///< Zero-intensity radius in world units.
 };
 
 /// @brief Constant ambient term added to every shaded pixel.

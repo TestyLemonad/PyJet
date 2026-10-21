@@ -428,12 +428,20 @@ namespace Renderer
                 }
             }
 
-            // Per-channel modulation (mirrors jetModulateRGB565 in Renderer.cpp).
+            // Per-channel modulation (mirrors the rasterizer's channel
+            // helper). The directional colour tints the diffuse term, while
+            // ambient stays additive per channel.
             const uint16_t base = tri.material->color;
             const uint32_t maxBrightness = 255u + tri.material->specular;
-            const uint32_t tR = std::min(brightness + ambR, maxBrightness);
-            const uint32_t tG = std::min(brightness + ambG, maxBrightness);
-            const uint32_t tB = std::min(brightness + ambB, maxBrightness);
+            const uint32_t dirR = directionalLight
+                ? brightness * directionalLight->color.r / 255u : 0;
+            const uint32_t dirG = directionalLight
+                ? brightness * directionalLight->color.g / 255u : 0;
+            const uint32_t dirB = directionalLight
+                ? brightness * directionalLight->color.b / 255u : 0;
+            const uint32_t tR = std::min(dirR + ambR, maxBrightness);
+            const uint32_t tG = std::min(dirG + ambG, maxBrightness);
+            const uint32_t tB = std::min(dirB + ambB, maxBrightness);
             auto ch5 = [](uint32_t base5, uint32_t t) -> uint32_t {
                 if (t > 255) { const uint32_t blow = t-255; return base5 + ((31u-base5)*blow)/256u; }
                 const uint32_t v = base5 * t; return (v + 128u + (v>>8)) >> 8;

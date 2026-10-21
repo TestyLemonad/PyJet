@@ -132,6 +132,10 @@
 // Roughly doubles per-vertex cost.
 #define LIGHTING 0
 
+// JET_POINT_LIGHTS: Compile in diffuse point-light shading. Requires LIGHTING.
+// Point lights add a per-pixel range calculation, so this is opt-in.
+#define JET_POINT_LIGHTS 0
+
 // Z_BRIGHTNESS: Darken distant pixels proportionally to their depth, giving
 // a cheap depth-cue effect. If FAST_Z is on, use LAZY_Z too to avoid
 // large near triangles being incorrectly darkened by their average Z.

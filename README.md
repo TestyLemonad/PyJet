@@ -24,8 +24,10 @@ on ordinary desktops too.
 - Full-resolution RGB565 output with a depth buffer.
 - Camera with position, rotation, `lookAt()`, FOV and near/far clipping.
 - Flat, Gouraud and Phong shading, wireframe and unlit modes.
-- Directional and ambient lighting; point-light objects for custom/native shading.
-- Triangle meshes built directly from Python lists.
+- Directional, ambient and world-space point lighting, with per-channel light
+  colour and point-light range falloff.
+- Triangle meshes built directly from Python lists, with automatic face normals
+  or optional per-vertex normals for smooth shading.
 - Per-mesh culling, blending and depth-buffer options.
 - Framebuffer readback as `bytes`, plus RGB888 conversion.
 - Wheels for Linux, Windows and macOS via `cibuildwheel`.
@@ -89,6 +91,24 @@ rgb = pyjet3d.framebuffer_to_rgb(
 Image.frombytes("RGB", (scene.width, scene.height), rgb).save("triangle.png")
 ```
 
+Lighting is optional and uses the same scene:
+
+```python
+sun = pyjet3d.DirectionalLight(
+    azimuth=225, elevation=45, r=255, g=241, b=214, intensity=255
+)
+scene.setDirectionalLight(sun)
+scene.setAmbientLight(pyjet3d.AmbientLight(100, 104, 120))
+scene.addPointLight(
+    pyjet3d.PointLight(-220, -80, -280, 255, 190, 120, 150, 900)
+)
+```
+
+Point lights fade linearly from `rangeMin` to `rangeMax` and illuminate the
+built-in FLAT/GOURAUD/PHONG paths.  If a scene has no lights at all, surfaces
+use their raw material colour at full brightness; add ambient light when you
+want visible fill in shaded areas.
+
 ## Python demos
 
 The repository contains runnable, dependency-free demos:
@@ -96,12 +116,13 @@ The repository contains runnable, dependency-free demos:
 | Demo | Description |
 | --- | --- |
 | [`examples/python/triangle.py`](examples/python/triangle.py) | Smallest possible render; writes `triangle.ppm`. |
-| [`examples/python/lit_cube.py`](examples/python/lit_cube.py) | Depth-tested cube with camera, ambient light and directional light. |
-| [`examples/python/orbit.py`](examples/python/orbit.py) | A rotating-cube frame sequence for animation experiments. |
+| [`examples/python/lit_cube.py`](examples/python/lit_cube.py) | Depth-tested cube with directional, ambient and point lights; `--smooth` demonstrates authored vertex normals. |
+| [`examples/python/orbit.py`](examples/python/orbit.py) | A rotating-cube frame sequence with the same lighting rig. |
 
 ```bash
 python examples/python/triangle.py
 python examples/python/lit_cube.py --output lit_cube.ppm
+python examples/python/lit_cube.py --smooth --output lit_cube_smooth.ppm
 python examples/python/orbit.py --frames 24 --output-dir orbit_frames
 ```
 
@@ -125,12 +146,13 @@ See [`examples/python/README.md`](examples/python/README.md) for options and
 - **Scene** — dimensions, camera, lights, mesh submission, backcolor, clearing,
   framebuffer readback, pixel access and frame statistics.
 - **Camera** — position, Euler rotation, `lookAt()`, FOV and clipping planes.
-- **Mesh** — vertices, triangle indices, transforms, culling, blending and
-  depth flags.  Geometry is copied into the scene at `addMesh()` time.
+- **Mesh** — vertices, triangle indices, optional per-vertex normals,
+  transforms, culling, blending and depth flags.  Geometry is copied into the
+  scene at `addMesh()` time.
 - **Material** — RGB565 colour, alpha, diffuse/specular/emissive properties and
   all shading modes.
-- **Lights** — directional and ambient lighting; point-light objects for
-  custom/native shading.
+- **Lights** — directional, ambient and world-space point lights, all evaluated
+  by the built-in lit shading modes.
 - **Helpers** — `framebuffer_to_rgb()` and the small `Vector3`, `Color` value
   types.
 

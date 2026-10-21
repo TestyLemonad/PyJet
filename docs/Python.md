@@ -123,7 +123,8 @@ A `Scene` owns its colour and depth buffers.  The Python build uses:
 - a depth buffer (Z-buffering is enabled);
 - the lighting path;
 - one directional light slot and one ambient light slot;
-- point-light objects that can be stored for custom/native shading.
+- any number of world-space point lights evaluated by the built-in
+  FLAT/GOURAUD/PHONG paths.
 
 A typical frame is:
 
@@ -184,9 +185,9 @@ when it is added:
 mesh = pyjet3d.Mesh(
     [
         (-100, -100, 0),
-        (100, -100, 0),
-        (100, 100, 0),
         (-100, 100, 0),
+        (100, 100, 0),
+        (100, -100, 0),
     ],
     [(0, 1, 2), (0, 2, 3)],
 )
@@ -207,14 +208,47 @@ Constructor rules:
 - Indices are 16-bit; a single mesh supports at most 65,536 vertices.
 - Out-of-range indices raise `ValueError`/`IndexError` instead of silently
   reading invalid geometry.
+- `normals` is optional.  Supply exactly one normal per vertex to control
+  lighting explicitly; omit it to compute one normal per face automatically.
+
+### Normals and smooth shading
+
+By default, each triangle gets its own face normal.  Indexed meshes may share
+vertices, so the binding splits a shared vertex into one copy per distinct
+face normal.  Coplanar triangles keep sharing vertices, while a cube corner
+becomes three vertices with the correct normal for each face.  This is what
+makes FLAT, GOURAUD and PHONG shading agree on low-poly models.  The split can
+increase the internal vertex count; a mesh that expands beyond 65,536 vertices
+raises `ValueError`.
+
+For smooth GOURAUD/PHONG shading, pass authored normals:
+
+```python
+# Unit-length normals, one per vertex.  They do not need to be normalised by
+# the caller; the binding normalises and converts them to fixed point.
+smooth_quad = pyjet3d.Mesh(
+    [(-80, -80, 0), (-80, 80, 0), (80, 80, 0), (80, -80, 0)],
+    [(0, 1, 2), (0, 2, 3)],
+    [(0, 0, -1), (0, 0, -1), (0, 0, -1), (0, 0, -1)],
+)
+```
+
+Normals must be finite and non-zero.  A smooth normal may point in any
+direction; it is not re-derived from the triangle winding.  FLAT shading still
+uses the first vertex normal of each triangle, so use GOURAUD or PHONG when you
+want a smooth field.  `setScale()` applies the inverse-transpose factor to
+custom normals and requires all three scale components to be non-zero;
+automatically generated normals are simply recomputed for the scaled
+geometry.
 
 Transforms:
 
 - `setPosition(x, y, z)` sets the object position.
 - `setRotation(x, y, z)` sets absolute Euler rotation in degrees.
 - `setScale(x, y, z)` scales the **original local vertices** and recomputes
-  flat normals.  It is absolute, not cumulative: calling it twice with the same
-  value produces the same geometry.
+  automatic face normals (or re-applies the inverse-transpose transform to
+  authored normals).  It is absolute, not cumulative: calling it twice with
+  the same value produces the same geometry.
 - `cullingMode` defaults to `CullingMode.CULL_BACKFACES`.
 - `blendMode` selects the blend operation for the object.
 - `ignoreZBuffer` draws without depth testing; `noWriteZBuffer` writes colour
@@ -314,8 +348,13 @@ scene.setDirectionalLight(sun)
 ambient = pyjet3d.AmbientLight(100, 104, 120)
 scene.setAmbientLight(ambient)
 
-# Stored for custom/native shading; built-in materials use sun + ambient.
-lamp = pyjet3d.PointLight(0, 80, -250, 255, 180, 100, 0, 512)
+# A warm point light in world space.  Full intensity inside rangeMin, a linear
+# fade to zero at rangeMax.
+lamp = pyjet3d.PointLight(
+    x=-220, y=-80, z=-280,
+    r=255, g=190, b=120,
+    rangeMin=150, rangeMax=900,
+)
 scene.addPointLight(lamp)
 ```
 
@@ -323,20 +362,31 @@ scene.addPointLight(lamp)
   intensity=255)`: an infinite-distance light.  `direction` stores
   `(azimuth, elevation, 0)` in degrees.  If you assign `light.direction`
   directly, call `light.updateDirection(azimuth, elevation)` to recompute the
-  derived vector.
-- `AmbientLight(r=32, g=32, b=32)`: a constant per-channel ambient tint.
+  derived vector.  `color` tints the directional contribution per channel and
+  `intensity` scales it.
+- `AmbientLight(r=32, g=32, b=32)`: a constant per-channel ambient tint.  It
+  is added after the lit terms and does not cast shadows.
 - `PointLight(x, y, z, r=255, g=255, b=255, rangeMin=0, rangeMax=255)`:
-  a world-space light value with a linear falloff between the two ranges.
-  Set `light.enabled = False` to switch it off.
+  a world-space diffuse light.  The contribution is full inside `rangeMin`,
+  fades linearly to zero at `rangeMax`, and is absent outside `rangeMax`.
+  Set `rangeMax <= rangeMin` (for example both to zero) to disable distance
+  attenuation.  Set `light.enabled = False` to switch it off.
 
-The built-in fixed-function shading in the Python build uses the directional
-and ambient lights.  `PointLight` objects are exposed and stored by
-`Scene.addPointLight()`, but they do not currently illuminate built-in
-materials; they are available to native/custom shader extensions.
+The built-in FLAT, GOURAUD and PHONG paths evaluate directional, ambient and
+point lights.  Directional lighting also contributes a view-facing specular
+term when `material.specular` is non-zero, and PHONG adds a per-pixel
+`specularExponent` highlight.  Point lights are diffuse-only and do not add
+specular highlights.  Point lights use a squared Lambert term.  They are
+evaluated per pixel for GOURAUD/PHONG (including smooth custom normals) and
+once per triangle for FLAT.  For a point-light-only scene, add a small ambient
+term if you do not want surfaces outside the light range to be black.
 
-Lighting affects lit shading modes (`FLAT` on lit materials, `GOURAUD`,
-`PHONG`).  If there is no directional or ambient light, surfaces are drawn at
-full brightness; ambient light gives a flat, coloured base contribution.
+When the scene has **no light sources at all**, surfaces use their raw material
+colour at full brightness for backwards compatibility.  As soon as any
+directional, ambient or enabled point light exists, surfaces outside its
+influence become black unless ambient light fills them.  `UNLIT`,
+`emissive=True`, `ADDITIVE` and custom shaders bypass the built-in lighting
+path.
 
 ## Framebuffer and images
 
@@ -439,11 +489,11 @@ Scene(width=320, height=240)
 | `setCamera(camera)` | Set the active camera.  The scene keeps a reference. |
 | `setDirectionalLight(light)` | Set the single directional light (or replace it). |
 | `setAmbientLight(light)` | Set the single ambient light. |
-| `addPointLight(light)` | Store a point-light object for custom/native shading; the scene keeps a reference. |
+| `addPointLight(light)` | Add a world-space point light; the scene keeps a reference. |
 | `setBackcolor(color)` | Set the RGB565 clear colour. |
 | `setClearBuffer(clear)` | Enable/disable clearing the colour buffer each render. |
 | `addMesh(mesh, material)` | Copy a `Mesh` into the scene with a material. |
-| `addMesh(vertices, material, indices=[])` | Build and add a mesh from Python sequences. |
+| `addMesh(vertices, material, indices=[], normals=[])` | Build and add a mesh from Python sequences; optional per-vertex normals enable smooth shading. |
 | `render()` | Render one frame.  Raises if no camera is set. |
 | `get_framebuffer()` | Return `width * height * 2` bytes of little-endian RGB565. |
 | `get_pixel(x, y)` | Return one RGB565 integer; raises `IndexError` out of range. |
@@ -470,7 +520,7 @@ Camera()
 ### `pyjet3d.Mesh`
 
 ```python
-Mesh(vertices, indices=[])
+Mesh(vertices, indices=[], normals=[])
 ```
 
 | Member | Description |
@@ -478,6 +528,7 @@ Mesh(vertices, indices=[])
 | `setPosition(x, y, z)` | Set the object position. |
 | `setRotation(x, y, z)` | Set absolute Euler rotation in degrees. |
 | `setScale(x, y, z)` | Bake an absolute local scale into the vertices. |
+| `normals` (constructor) | Optional per-vertex normals for smooth GOURAUD/PHONG lighting. |
 | `cullingMode` | `CullingMode.CULL_BACKFACES` (default), `CULL_FRONTFACES` or `NO_CULLING`. |
 | `blendMode` | One of the `BlendMode` values. |
 | `ignoreZBuffer` | Draw without depth testing when `True`. |
@@ -506,9 +557,9 @@ Material(color, alpha)
 
 | Type | Description |
 | --- | --- |
-| `DirectionalLight(azimuth=225, elevation=45, r=255, g=255, b=255, intensity=255)` | Infinite light.  `direction`, `color`, `intensity`, `updateDirection()`. |
+| `DirectionalLight(azimuth=225, elevation=45, r=255, g=255, b=255, intensity=255)` | Infinite light; its colour tints the directional diffuse/specular contribution.  `direction`, `color`, `intensity`, `updateDirection()`. |
 | `AmbientLight(r=32, g=32, b=32)` | Constant ambient term.  `color`. |
-| `PointLight(x, y, z, r=255, g=255, b=255, rangeMin=0, rangeMax=255)` | Point-light value for custom/native shading.  `position`, `color`, `rangeMin`, `rangeMax`, `enabled`. |
+| `PointLight(x, y, z, r=255, g=255, b=255, rangeMin=0, rangeMax=255)` | World-space diffuse point light with a linear range fade.  `position`, `color`, `rangeMin`, `rangeMax`, `enabled`. |
 | `Color(r=255, g=255, b=255)` | 8-bit RGB value used by lights. |
 | `Vector3(x=0, y=0, z=0)` | Integer world-space vector. |
 
@@ -551,9 +602,14 @@ code.
 - **The material changes do not show:** materials are referenced, but the scene
   still needs another `render()` after the change.
 - **Everything is dark:** add `AmbientLight` and/or a directional light, and
-  check that the light is not behind all visible faces.  `UNLIT` or
-  `emissive=True` bypasses lighting.  Point lights do not affect the built-in
-  shaded path yet.
+  check that the light is not behind all visible faces.  For point lights,
+  check `rangeMax` against the distance from the light to the surface and make
+  sure the triangle normal faces the light.  `UNLIT`, `emissive=True` and
+  `ADDITIVE` bypass lighting.
+- **A cube has one dark face:** meshes are lit with face normals by default.
+  Indexed geometry is split per face normal automatically, so FLAT and GOURAUD
+  should agree on a planar face.  If you want a rounded, smooth surface, pass
+  explicit per-vertex normals and use `GOURAUD` or `PHONG`.
 - **A large scene is clipped:** increase `camera.farPlane`; decrease
   `nearPlane` for close objects.  Keep in mind that the renderer is a software
   rasteriser and very large framebuffers are expensive.
@@ -567,14 +623,15 @@ The repository includes dependency-free Python demos:
 | Demo | What it shows |
 | --- | --- |
 | [`examples/python/triangle.py`](../examples/python/triangle.py) | Minimal render and PPM output. |
-| [`examples/python/lit_cube.py`](../examples/python/lit_cube.py) | A depth-tested cube with camera, directional light and ambient light. |
-| [`examples/python/orbit.py`](../examples/python/orbit.py) | A short rotating-cube frame sequence. |
+| [`examples/python/lit_cube.py`](../examples/python/lit_cube.py) | A depth-tested cube with directional, ambient and point lights; `--smooth` demonstrates authored normals. |
+| [`examples/python/orbit.py`](../examples/python/orbit.py) | A short rotating-cube frame sequence with the same lighting rig. |
 
 Run them from the repository root:
 
 ```bash
 python examples/python/triangle.py
 python examples/python/lit_cube.py --output lit_cube.ppm
+python examples/python/lit_cube.py --smooth --output lit_cube_smooth.ppm
 python examples/python/orbit.py --frames 24 --output-dir orbit_frames
 ```
 

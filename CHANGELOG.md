@@ -18,11 +18,27 @@
   automatically recalculates it for the scene dimensions.
 - Added sdist header inclusion via `MANIFEST.in`.
 - Removed generated `.so`, `.pyc` and `*.egg-info` files from the repository.
+- Fixed indexed meshes corrupting shared-vertex normals: vertices are now split
+  only when incident triangles have different face normals, so FLAT, GOURAUD
+  and PHONG agree on cube faces and other low-poly geometry.
+- Fixed directional-light colour being ignored by the diffuse term.  Light
+  colour now tints FLAT, GOURAUD and PHONG diffuse lighting per channel.
+- Fixed point lights being stored but never sampled.  The built-in lit paths
+  now evaluate view-space point lights with squared-Lambert diffuse lighting,
+  per-channel colour and linear `rangeMin`/`rangeMax` attenuation.
+- Disabled the object-local directional precompute while point lights are
+  active so view-space point lighting remains correct.
 
 ### Added
 
-- Full-resolution depth-buffered Python configuration with directional and
-  ambient lighting.
+- Full-resolution depth-buffered Python configuration with directional,
+  ambient and point lighting.
+- Optional per-vertex normals for `Mesh` and `Scene.addMesh()`, enabling smooth
+  GOURAUD/PHONG shading while default meshes retain automatic per-face normals.
+- `JET_POINT_LIGHTS` feature flag: enabled for the Python build, off by default
+  in the embedded/desktop config templates.
+- Lighting regression tests covering shared cube vertices, custom normals,
+  directional color, ambient-only scenes and point-light range falloff.
 - Camera rotation, look-at, near/far planes and position/rotation properties.
 - `Vector3`, `Color`, `DirectionalLight`, `AmbientLight` and `PointLight`.
 - Material alpha/diffuse/specular/emissive properties and all shading modes.

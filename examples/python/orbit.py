@@ -17,6 +17,11 @@ def main():
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument("--frames", type=int, default=12)
     parser.add_argument("--output-dir", default="orbit_frames")
+    parser.add_argument(
+        "--smooth",
+        action="store_true",
+        help="use authored per-vertex normals for smooth GOURAUD/PHONG shading",
+    )
     args = parser.parse_args()
 
     if args.frames < 1:
@@ -27,7 +32,7 @@ def main():
         angle = 360.0 * frame / args.frames
 
         scene, material = make_lit_scene(args.width, args.height)
-        mesh = cube_mesh(size=240)
+        mesh = cube_mesh(size=240, smooth=args.smooth)
         mesh.setRotation(0, angle, 0)
         scene.addMesh(mesh, material)
         scene.render()

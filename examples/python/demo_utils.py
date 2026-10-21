@@ -44,10 +44,13 @@ def make_camera(scene, position=(0, 0, -700), target=(0, 0, 0), fov=55):
     return camera
 
 
-def cube_mesh(size=220):
+def cube_mesh(size=220, smooth=False):
     """Return a centred cube with outward-facing triangles.
 
-    The winding is consistent, so the default CULL_BACKFACES mode works.
+    The winding is consistent, so the default CULL_BACKFACES mode works.  With
+    ``smooth=True`` the eight shared vertices receive outward normals, which
+    demonstrates authored per-vertex normals and rounded GOURAUD/PHONG shading.
+    Without it the binding splits vertices per face and renders crisp faces.
     """
     s = size / 2
     vertices = [
@@ -68,11 +71,15 @@ def cube_mesh(size=220):
         (0, 1, 5), (0, 5, 4),  # -Y
         (3, 7, 6), (3, 6, 2),  # +Y
     ]
-    return pyjet3d.Mesh(vertices, faces)
+    if not smooth:
+        return pyjet3d.Mesh(vertices, faces)
+
+    normals = [(x / s, y / s, z / s) for x, y, z in vertices]
+    return pyjet3d.Mesh(vertices, faces, normals)
 
 
 def make_lit_scene(width=320, height=240, material_color=0xF800):
-    """Create the standard camera, lights and red material used by demos."""
+    """Create the standard camera, three-light rig and material for demos."""
     scene = pyjet3d.Scene(width, height)
     scene.setBackcolor(rgb565(24, 32, 48))  # dark slate blue
     make_camera(scene)
@@ -87,6 +94,16 @@ def make_lit_scene(width=320, height=240, material_color=0xF800):
     )
     scene.setDirectionalLight(light)
     scene.setAmbientLight(pyjet3d.AmbientLight(100, 104, 120))
+
+    # Warm point light in front-left of the cube.  The linear range fade keeps
+    # the effect local without needing a falloff exponent.
+    scene.addPointLight(
+        pyjet3d.PointLight(
+            x=-220, y=-80, z=-280,
+            r=255, g=190, b=120,
+            rangeMin=150, rangeMax=900,
+        )
+    )
 
     material = pyjet3d.Material(material_color)
     material.shadingMode = pyjet3d.ShadingMode.PHONG

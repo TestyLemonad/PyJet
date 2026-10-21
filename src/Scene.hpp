@@ -307,6 +307,9 @@ private:
 
     std::vector<Object*> objects;
     std::vector<PointLight*> pointLights;
+#if LIGHTING && JET_POINT_LIGHTS
+    std::vector<PointLightView> framePointLights;
+#endif
     std::vector<Material*> materials;
     std::vector<Sprite2D*> sprites;
 

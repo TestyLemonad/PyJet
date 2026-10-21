@@ -261,34 +261,31 @@ static inline uint16_t jetShadeBrightness(const Vector3& N, const Vector3& L,
 // Per-channel coloured modulation.
 //
 // Lighting model (per channel, independently):
-//   scale_c = ambient_c + brightness                    (saturating)
+//   scale_c = directional_c + ambient_c + point_c        (saturating)
 //   final_c = base_c × scale_c / 255                    (+ blow-out to max
 //                                                         above 255)
 //
-// `brightness` carries the directional + view-facing-specular contribution
-// in [0 .. 255 + specularCoef]; the band above 255 lerps the channel
-// toward its maximum (the headroom `material->specular` opts into).
-// `ambR/G/B` is the ambient light colour (0..255 per channel) added to the
-// modulation factor BEFORE the base multiply — i.e. ambient tints the
-// material rather than replacing it. A brown cliff facing away from the
-// sun is still recognisably brown (just dimmer and tinted by the ambient
-// hue) rather than going pure ambient-colour as it would with an additive
+// `directional_c` carries the directional and view-facing-specular
+// contribution in [0 .. 255 + specularCoef], tinted by the light colour.
+// The band above 255 lerps the channel toward its maximum (the headroom
+// `material->specular` opts into). Ambient and point-light channels are
+// added to the modulation factor BEFORE the base multiply, so they tint the
+// material rather than replacing it. A brown cliff facing away from the sun
+// is still recognisably brown (just dimmer and tinted by the ambient hue)
+// rather than going pure ambient-colour as it would with an additive
 // post-multiply ambient.
 //
-// Inputs are RGB565 base, 16-bit `brightness` (post-clamp by caller), 8-bit
-// per-channel ambient. Output is RGB565.
-static inline uint16_t jetModulateRGB565(uint16_t color,
-                                         uint16_t brightness,
-                                         uint8_t ambR, uint8_t ambG, uint8_t ambB,
-                                         uint16_t maxBrightness)
+// Inputs are an RGB565 base, three per-channel modulation values and a
+// maximum brightness. Output is RGB565.
+static inline uint16_t jetModulateRGB565Channels(uint16_t color,
+                                                 uint32_t tR, uint32_t tG,
+                                                 uint32_t tB,
+                                                 uint16_t maxBrightness)
 {
     const uint32_t base_r = (color >> 11) & 0x1F;
     const uint32_t base_g = (color >>  5) & 0x3F;
     const uint32_t base_b =  color        & 0x1F;
 
-    uint32_t tR = (uint32_t)brightness + ambR;
-    uint32_t tG = (uint32_t)brightness + ambG;
-    uint32_t tB = (uint32_t)brightness + ambB;
     if (tR > maxBrightness) tR = maxBrightness;
     if (tG > maxBrightness) tG = maxBrightness;
     if (tB > maxBrightness) tB = maxBrightness;
@@ -315,6 +312,113 @@ static inline uint16_t jetModulateRGB565(uint16_t color,
     const uint32_t b = channel5(base_b, tB);
     return (uint16_t)((r << 11) | (g << 5) | b);
 }
+
+static inline uint16_t jetModulateRGB565(uint16_t color,
+                                         uint16_t brightness,
+                                         uint8_t ambR, uint8_t ambG, uint8_t ambB,
+                                         uint16_t maxBrightness)
+{
+    return jetModulateRGB565Channels(
+        color,
+        (uint32_t)brightness + ambR,
+        (uint32_t)brightness + ambG,
+        (uint32_t)brightness + ambB,
+        maxBrightness);
+}
+
+#if LIGHTING && JET_POINT_LIGHTS
+struct PointLightChannels {
+    uint32_t r;
+    uint32_t g;
+    uint32_t b;
+};
+
+// Recover the camera-space vertex position from the rasterizer's projected
+// coordinates. Keeping lighting in view space means point lights and normals
+// always share one coordinate frame, including when the object or camera is
+// rotated.
+static inline Vector3 jetViewPositionFromScreen(const Vector3& projected,
+                                                int screenWidth,
+                                                int screenHeight,
+                                                float fovFactor)
+{
+    if (!(fovFactor > 0.0f)) return Vector3(0, 0, projected.z);
+    const float inv = 1.0f / fovFactor;
+    const float z = (float)projected.z;
+    return Vector3(
+        int32_t(std::lround(((float)projected.x - (float)(screenWidth / 2)) * z * inv)),
+        int32_t(std::lround(((float)(screenHeight / 2) - (float)projected.y) * z * inv)),
+        projected.z);
+}
+
+// Diffuse contribution from every enabled point light.  `normal` must be a
+// unit view-space normal.  Point lights use the same squared-Lambert falloff
+// as the directional light, then a linear range fade.  Channels are kept
+// separate so coloured lights tint the material correctly.
+static inline PointLightChannels jetPointLightChannels(
+    const Vector3& normal,
+    const Vector3& surface,
+    const PointLightView* lights,
+    int lightCount,
+    uint8_t diffuseCoef)
+{
+    uint32_t outR = 0, outG = 0, outB = 0;
+    if (!lights || lightCount <= 0 || diffuseCoef == 0) {
+        return {0, 0, 0};
+    }
+
+    for (int i = 0; i < lightCount; ++i) {
+        const PointLightView& light = lights[i];
+        // Keep the distance maths in double precision: world coordinates are
+        // 32-bit integers and the sum of three squared differences can exceed
+        // INT64_MAX for extreme scenes.
+        const double dx = (double)light.position.x - surface.x;
+        const double dy = (double)light.position.y - surface.y;
+        const double dz = (double)light.position.z - surface.z;
+        const double distanceSq = dx * dx + dy * dy + dz * dz;
+        const double distance = std::sqrt(distanceSq);
+        if (!(distance > 0.0)) continue;
+
+        // rangeMax == rangeMin (or zero) means "no distance attenuation".
+        uint32_t attenuation = 255;
+        const double minRange = light.rangeMin;
+        const double maxRange = light.rangeMax;
+        if (maxRange > minRange) {
+            if (distance >= maxRange) continue;
+            if (distance > minRange) {
+                attenuation = (uint32_t)(((maxRange - distance) * 255.0) /
+                                         (maxRange - minRange));
+                if (attenuation > 255) attenuation = 255;
+            }
+        }
+
+        const double invDistance = (double)FIXED_POINT_SCALE / distance;
+        const int32_t lx = (int32_t)std::llround(dx * invDistance);
+        const int32_t ly = (int32_t)std::llround(dy * invDistance);
+        const int32_t lz = (int32_t)std::llround(dz * invDistance);
+
+        const int64_t dot = (int64_t)normal.x * lx +
+                            (int64_t)normal.y * ly +
+                            (int64_t)normal.z * lz;
+        if (dot <= 0) continue;
+
+        uint32_t lambert = (uint32_t)(dot >> 12);
+        if (lambert > 255) lambert = 255;
+        lambert = (lambert * lambert + 128) >> 8;
+        uint32_t diffuse = (lambert * attenuation + 128) >> 8;
+        diffuse = (diffuse * (uint32_t)diffuseCoef) >> 8;
+
+        outR += (diffuse * (uint32_t)light.color.r) >> 8;
+        outG += (diffuse * (uint32_t)light.color.g) >> 8;
+        outB += (diffuse * (uint32_t)light.color.b) >> 8;
+    }
+
+    if (outR > 255) outR = 255;
+    if (outG > 255) outG = 255;
+    if (outB > 255) outB = 255;
+    return {outR, outG, outB};
+}
+#endif // LIGHTING && JET_POINT_LIGHTS
 
 namespace Renderer
 {
@@ -565,6 +669,16 @@ namespace Renderer
         const uint8_t ambG = ambientLight ? ambientLight->color.g : 0;
         const uint8_t ambB = ambientLight ? ambientLight->color.b : 0;
         const uint16_t lightIntensity = directionalLight ? directionalLight->intensity : 0;
+        const Color directionalColor = directionalLight
+            ? directionalLight->color : Color{255, 255, 255};
+#if LIGHTING && JET_POINT_LIGHTS
+        const bool hasPointLights = pointLightCount > 0 && !emissive &&
+            material->shader == nullptr;
+#else
+        const bool hasPointLights = false;
+#endif
+        // With no light sources at all the surface keeps its raw colour.
+        const bool noLights = !directionalLight && !ambientLight && !hasPointLights;
         const bool glossyPhong = !emissive && directionalLight && material->specularExponent
             && material->specular && material->shadingMode == ShadingMode::PHONG;
         Vector3 specularHalf;
@@ -575,7 +689,7 @@ namespace Renderer
             if (length > 0) specularHalf = (specularHalf * FIXED_POINT_SCALE) / length;
         }
 
-        if (directionalLight)
+        if (directionalLight || hasPointLights)
         {
             if (material->shadingMode == ShadingMode::FLAT)
             {
@@ -595,7 +709,7 @@ namespace Renderer
                 // is not the right pipeline for that geometry anyway.
                 normal = v1.normal;
             }
-            else if (material->shadingMode == ShadingMode::GOURAUD)
+            else if (material->shadingMode == ShadingMode::GOURAUD && directionalLight)
             {
                 // Per-vertex Lambertian + view-facing specular. The triangle
                 // body of the rasterizer interpolates vertexBrightness[]
@@ -772,7 +886,7 @@ namespace Renderer
 #endif
 
 #if LIGHTING
-        if (!directionalLight && !ambientLight)
+        if (noLights)
         {
             brightness = 255;
         }
@@ -818,7 +932,7 @@ namespace Renderer
 #if LIGHTING
         // Cached Gouraud values may encode different per-vertex contributions
         // even when normals match; preserve their interpolation in that case.
-        const bool constantLighting = matchingNormals &&
+        const bool constantLighting = matchingNormals && !hasPointLights &&
             (material->shadingMode == ShadingMode::PHONG ||
              (material->shadingMode == ShadingMode::GOURAUD &&
               vertexBrightness[0] == vertexBrightness[1] &&
@@ -856,9 +970,11 @@ namespace Renderer
         // here and skipping the per-pixel block recovers the bulk of the
         // perf cost of enabling LIGHTING.
         bool flatColorPrecomputed = false;
+        // Only a scene with no light sources at all skips the lit path. A
+        // point-light-only scene must still evaluate its point lights, even
+        // for GOURAUD/PHONG materials.
         const bool flatShaded =
-            (!directionalLight && !ambientLight) ||
-            material->shadingMode == ShadingMode::FLAT;
+            noLights || material->shadingMode == ShadingMode::FLAT;
         const bool diffuseMapSamples =
 #if TEXTURE_MAPPING
             (material->diffuseMap != nullptr);
@@ -871,7 +987,49 @@ namespace Renderer
     #if POSTFX_CELLSHADING
             brightness &= celMask;
     #endif
-            color = jetModulateRGB565(color, brightness, ambR, ambG, ambB, maxBrightness);
+
+            uint32_t tR = 255, tG = 255, tB = 255;
+            if (noLights)
+            {
+                // Keep the raw material colour when the scene has no lights.
+            }
+            else
+            {
+                tR = directionalLight
+                    ? (uint32_t)brightness * directionalColor.r / 255 : 0;
+                tG = directionalLight
+                    ? (uint32_t)brightness * directionalColor.g / 255 : 0;
+                tB = directionalLight
+                    ? (uint32_t)brightness * directionalColor.b / 255 : 0;
+                tR += ambR;
+                tG += ambG;
+                tB += ambB;
+            }
+
+#if LIGHTING && JET_POINT_LIGHTS
+            if (hasPointLights)
+            {
+                const float fovFactor = (camera && camera->fovFactor > 0.0f)
+                    ? camera->fovFactor : 1.0f;
+                // FLAT bakes one colour for the whole triangle. Sample the
+                // point lights at the projected centroid rather than at an
+                // arbitrary corner so a nearby light is represented fairly.
+                const Vector3 centroid(
+                    (v1.position.x + v2.position.x + v3.position.x) / 3,
+                    (v1.position.y + v2.position.y + v3.position.y) / 3,
+                    (v1.position.z + v2.position.z + v3.position.z) / 3);
+                const Vector3 viewPosition = jetViewPositionFromScreen(
+                    centroid, screenWidth, screenHeight, fovFactor);
+                const PointLightChannels point = jetPointLightChannels(
+                    normal, viewPosition, pointLights, pointLightCount,
+                    material->diffuse);
+                tR += point.r;
+                tG += point.g;
+                tB += point.b;
+            }
+#endif
+            color = jetModulateRGB565Channels(
+                color, tR, tG, tB, maxBrightness);
             flatColorPrecomputed = true;
         }
 
@@ -1982,6 +2140,54 @@ namespace Renderer
     #if LIGHTING
                     uint16_t gloss = constantGloss;
     #endif
+    #if LIGHTING && JET_POINT_LIGHTS
+                    // Point lights need a per-pixel view-space position and
+                    // normal. Position is reconstructed from the projected
+                    // screen coordinate; the normal is interpolated exactly
+                    // like the PHONG path (FLAT keeps the face normal).
+                    PointLightChannels pointChannels = {0, 0, 0};
+                    if (hasPointLights && !flatColorPrecomputed)
+                    {
+                        Vector3 pointNormal = v1.normal;
+                        if (material->shadingMode != ShadingMode::FLAT)
+                        {
+    #if PERSPECTIVE_CORRECT_TEXTURES
+                            const int32_t pctOneOverZ =
+                                (oneOverZ1 * w0 + oneOverZ2 * w1 + oneOverZ3 * w2) / denom;
+                            if (pctOneOverZ != 0)
+                            {
+                                const int32_t nxOZ = (nxOverZ1 * w0 + nxOverZ2 * w1 + nxOverZ3 * w2) / denom;
+                                const int32_t nyOZ = (nyOverZ1 * w0 + nyOverZ2 * w1 + nyOverZ3 * w2) / denom;
+                                const int32_t nzOZ = (nzOverZ1 * w0 + nzOverZ2 * w1 + nzOverZ3 * w2) / denom;
+                                pointNormal.x = (nxOZ * FIXED_POINT_SCALE) / pctOneOverZ;
+                                pointNormal.y = (nyOZ * FIXED_POINT_SCALE) / pctOneOverZ;
+                                pointNormal.z = (nzOZ * FIXED_POINT_SCALE) / pctOneOverZ;
+                            }
+                            else
+                            {
+                                pointNormal = {0, 0, -(int32_t)FIXED_POINT_SCALE};
+                            }
+    #else
+                            pointNormal.x = (v1.normal.x * w0 + v2.normal.x * w1 + v3.normal.x * w2) / denom;
+                            pointNormal.y = (v1.normal.y * w0 + v2.normal.y * w1 + v3.normal.y * w2) / denom;
+                            pointNormal.z = (v1.normal.z * w0 + v2.normal.z * w1 + v3.normal.z * w2) / denom;
+    #endif
+                            const auto normalLength = pointNormal.length();
+                            if (normalLength > 0)
+                            {
+                                pointNormal = (pointNormal * static_cast<int32_t>(FIXED_POINT_SCALE)) / normalLength;
+                            }
+                        }
+
+                        const float fovFactor = (camera && camera->fovFactor > 0.0f)
+                            ? camera->fovFactor : 1.0f;
+                        const Vector3 viewPosition = jetViewPositionFromScreen(
+                            Vector3(x, y, z), screenWidth, screenHeight, fovFactor);
+                        pointChannels = jetPointLightChannels(
+                            pointNormal, viewPosition, pointLights, pointLightCount,
+                            material->diffuse);
+                    }
+    #endif
     #if LIGHTING || Z_BRIGHTNESS
                     if (directionalLight)
                     {
@@ -2092,11 +2298,31 @@ namespace Renderer
                         //      has no function call and no re-extract.
                         //   2) Textured: `color` is the freshly-sampled texel,
                         //      so we need the general per-channel helper.
+                        uint32_t tR, tG, tB;
+                        if (noLights)
+                        {
+                            tR = tG = tB = 255;
+                        }
+                        else
+                        {
+                            tR = directionalLight
+                                ? (uint32_t)brightness * directionalColor.r / 255 : 0;
+                            tG = directionalLight
+                                ? (uint32_t)brightness * directionalColor.g / 255 : 0;
+                            tB = directionalLight
+                                ? (uint32_t)brightness * directionalColor.b / 255 : 0;
+                            tR += ambR;
+                            tG += ambG;
+                            tB += ambB;
+    #if LIGHTING && JET_POINT_LIGHTS
+                            tR += pointChannels.r;
+                            tG += pointChannels.g;
+                            tB += pointChannels.b;
+    #endif
+                        }
+
                         if (litPerPixelUntextured)
                         {
-                            uint32_t tR = (uint32_t)brightness + ambR;
-                            uint32_t tG = (uint32_t)brightness + ambG;
-                            uint32_t tB = (uint32_t)brightness + ambB;
                             if (tR > litMaxBrightness) tR = litMaxBrightness;
                             if (tG > litMaxBrightness) tG = litMaxBrightness;
                             if (tB > litMaxBrightness) tB = litMaxBrightness;
@@ -2113,7 +2339,8 @@ namespace Renderer
                         else
                         {
                             const uint16_t maxBrightness = (uint16_t)(255u + material->specular);
-                            color = jetModulateRGB565(color, brightness, ambR, ambG, ambB, maxBrightness);
+                            color = jetModulateRGB565Channels(
+                                color, tR, tG, tB, maxBrightness);
                         }
     #else
                         // Z_BRIGHTNESS-only path: no ambient light, just a

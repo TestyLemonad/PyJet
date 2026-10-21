@@ -13,6 +13,10 @@
 #define JET_RUNTIME_DEPTH 0
 #endif
 
+#ifndef JET_POINT_LIGHTS
+#define JET_POINT_LIGHTS 0
+#endif
+
 /// @def ZBUFFER_STRIDE(w)
 /// @brief Z-buffer row stride in pixels for a framebuffer of width @p w.
 ///
@@ -132,6 +136,17 @@ class Rasterizer
         bool skipWaterReflect = false;  ///< Skip WATER_REFLECT triangles (parallel-band first pass).
         bool waterReflectOnly = false;  ///< Draw ONLY WATER_REFLECT triangles (serial second pass).
         /// @}
+
+#if LIGHTING && JET_POINT_LIGHTS
+        /// @name Point lights (view space)
+        /// @brief Scene transforms enabled point lights into camera space once
+        /// per frame. The rasterizer evaluates their diffuse contribution per
+        /// pixel for the built-in FLAT/GOURAUD/PHONG shaders.
+        /// @{
+        const PointLightView* pointLights = nullptr;
+        int pointLightCount = 0;
+        /// @}
+#endif
 
         /// @brief Screen row of the water/sky horizon, computed from camera pitch each frame.
         ///        Used as the reflection axis: mirrorY = 2*waterlineY - y.

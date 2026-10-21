@@ -126,6 +126,12 @@
 // Roughly doubles per-vertex cost.
 #define LIGHTING 1
 
+// JET_POINT_LIGHTS: Compile in diffuse point-light shading for the built-in
+// lit paths. Point lights are evaluated in view space, so they add a
+// per-pixel distance/range calculation. The Python build enables them for API
+// parity; the embedded templates leave them off unless needed.
+#define JET_POINT_LIGHTS 1
+
 // Z_BRIGHTNESS: Darken distant pixels proportionally to their depth, giving
 // a cheap depth-cue effect. If FAST_Z is on, use LAZY_Z too to avoid
 // large near triangles being incorrectly darkened by their average Z.

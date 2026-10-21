@@ -599,6 +599,30 @@ void Scene::prepareFrame() {
     if (directionalLight) directionalLight->updateViewSpaceDirection(camera);
 #endif
 
+#if LIGHTING && JET_POINT_LIGHTS
+    // Transform enabled point lights into camera space once per frame. The
+    // rasterizer needs view-space positions because its vertex normals are
+    // already in view space (or are transformed there below).
+    framePointLights.clear();
+    framePointLights.reserve(pointLights.size());
+    for (PointLight* light : pointLights) {
+        if (!light || !light->enabled) continue;
+        const Vector3 relative(
+            light->position.x - camera->position.x,
+            light->position.y - camera->position.y,
+            light->position.z - camera->position.z);
+        PointLightView viewLight;
+        viewLight.position = camera->transformDirection(relative);
+        viewLight.color = light->color;
+        viewLight.rangeMin = light->rangeMin;
+        viewLight.rangeMax = light->rangeMax;
+        framePointLights.push_back(viewLight);
+    }
+    renderer->pointLights = framePointLights.empty()
+        ? nullptr : framePointLights.data();
+    renderer->pointLightCount = static_cast<int>(framePointLights.size());
+#endif
+
     // Thread sky gradient and frame counter into the rasterizer so
     // WATER_REFLECT shading can sample them. Intentionally outside
     // #if LIGHTING — works with LIGHTING=0 on firmware.
@@ -1289,11 +1313,20 @@ void PERF_CRITICAL Scene::renderObject(Object* obj,
 #if defined(JET_SKIP_UNLIT_NORMALS) && !JET_SKIP_UNLIT_NORMALS
     unlitObject = false;
 #endif
+#if LIGHTING && JET_POINT_LIGHTS
+    // Point lights are position-dependent, so the object-local directional
+    // precompute cannot represent them. Fall back to view-space normals and
+    // let the rasterizer combine directional and point contributions.
+    const bool hasActivePointLights = renderer->pointLightCount > 0;
+#else
+    const bool hasActivePointLights = false;
+#endif
     bool objectLocalLight = false;
     Vector3 objLightDir = {0, 0, 0};
     uint16_t objLightIntensity = 0;
     uint8_t  objDiffuseCoef = 255;
-    if (directionalLight && !unlitObject && !meshSource->triangles.empty()) {
+    if (directionalLight && !unlitObject && !hasActivePointLights &&
+        !meshSource->triangles.empty()) {
         bool allNonSpecular = true;
         // Per-triangle material walk. Cheap — a handful of byte loads
         // per face — and exits early on the first specular material we
