@@ -6,6 +6,15 @@
 
 namespace Renderer {
 
+/// Convert packed RGB565 pixels to packed RGB888 bytes (3 bytes per pixel).
+/// The 5/6-bit channels use the same rounded expansion as Python's historic
+/// framebuffer_to_rgb helper: (c * 255 + max/2) / max.
+void convertRGB565ToRGB888(const uint16_t* src, uint8_t* dst, size_t count);
+
+/// Convert packed RGB565 pixels to opaque RGBA8888 bytes. On little-endian
+/// targets each 32-bit word is 0xFFBBGGRR, i.e. the byte order R, G, B, 0xFF.
+void convertRGB565ToRGBA8888(const uint16_t* src, uint32_t* dst, size_t count);
+
 // Convert a half-width RGB565 row to the panel's byte order, duplicating
 // each source pixel horizontally. Source and destination must not overlap.
 inline void expandSwapRGB565(uint16_t* dst, const uint16_t* src, size_t count) {

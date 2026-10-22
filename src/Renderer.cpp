@@ -9,6 +9,7 @@
 #include "BlendSpans.hpp"
 #include "TextureSpans.hpp"
 #include <type_traits>
+#include "Simd.hpp"
 
 #if defined(CHECKERBOARD_MODE) && CHECKERBOARD_MODE && defined(FIELD_BUFFERS) && FIELD_BUFFERS
 #error "CHECKERBOARD_MODE and FIELD_BUFFERS (interlaced) cannot both be enabled. Each would render only one quarter of pixels per frame and interact destructively. Pick one."
@@ -101,6 +102,7 @@ static inline void fillRGB565Span(uint16_t* framebuffer, int32_t bufferIndex, in
 {
     if (count <= 0) return;
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
     int32_t idx = bufferIndex;
     int32_t remaining = count;
     if (idx & 1) {
@@ -112,7 +114,6 @@ static inline void fillRGB565Span(uint16_t* framebuffer, int32_t bufferIndex, in
     int32_t pairs = remaining >> 1;
     uint32_t* out = reinterpret_cast<uint32_t*>(&framebuffer[idx]);
 
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
     if (pairs >= 8) {
         while (pairs > 0 && (((uintptr_t)out & 0x0F) != 0)) {
             *out++ = color32;
@@ -140,14 +141,12 @@ static inline void fillRGB565Span(uint16_t* framebuffer, int32_t bufferIndex, in
             pairs -= quads << 2;
         }
     }
-#endif
 
-    for (int32_t i = 0; i < pairs; ++i) {
-        *out++ = color32;
-    }
-    if (remaining & 1) {
-        *reinterpret_cast<uint16_t*>(out) = color;
-    }
+    for (int32_t i = 0; i < pairs; ++i) *out++ = color32;
+    if (remaining & 1) *reinterpret_cast<uint16_t*>(out) = color;
+#else
+    Simd::fillRGB565(framebuffer + bufferIndex, static_cast<size_t>(count), color);
+#endif
 }
 
 // -----------------------------------------------------------------------------

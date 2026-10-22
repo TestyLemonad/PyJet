@@ -2,17 +2,56 @@
 #include "TrigLUT.hpp"
 #include "Renderer.hpp"
 #include "BlendSpans.hpp"
+#include "Simd.hpp"
 #include "JetConfig.hpp"
 #include <cstring> // For memset
 #include <algorithm> // For std::min, std::max
 #include <cmath> // For sqrtf (per-object distance fade / LOD pick)
 #include <cstdlib>
+#if JET_THREADED_RASTER
+#include <thread>
+#endif
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #include <esp_heap_caps.h>
 #include <new>
 #endif
 
 namespace Renderer {
+
+// Set one byte in the shared raster-flag array. Multiple bands may hit the
+// same triangle (triangles can span tile boundaries), so use a relaxed atomic
+// byte store instead of a plain write. The value is always 1, making the
+// operation idempotent even when several threads race on the same entry.
+inline void markRasterizedTriangle(uint8_t* flags, size_t index)
+{
+#if defined(_MSC_VER)
+    _InterlockedExchange8(reinterpret_cast<volatile char*>(flags + index), 1);
+#elif defined(__GNUC__)
+    __atomic_store_n(flags + index, static_cast<uint8_t>(1), __ATOMIC_RELAXED);
+#else
+    flags[index] = 1;
+#endif
+}
+
+#if JET_THREADED_RASTER
+static int defaultRasterThreadCount(int width, int height)
+{
+    unsigned hardware = std::thread::hardware_concurrency();
+    if (hardware == 0) hardware = 1;
+    // Small framebuffers do not have enough tiles to keep a large pool busy;
+    // the synchronisation cost would dominate. Grow to the configured cap
+    // only once the clear/raster work is large enough to amortise it.
+    const uint64_t pixels = static_cast<uint64_t>(width) * height;
+    const unsigned limit = pixels < (1u << 20)
+        ? std::min(4u, static_cast<unsigned>(JET_MAX_RASTER_THREADS))
+        : static_cast<unsigned>(JET_MAX_RASTER_THREADS);
+    return static_cast<int>(std::min(hardware, limit));
+}
+#endif
+
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
 #ifndef JET_S3_TRANSFORM_INTERNAL_BYTES
 #define JET_S3_TRANSFORM_INTERNAL_BYTES 4096
@@ -299,6 +338,11 @@ void Scene::resize(uint16_t* newFramebuffer, uint16_t* newZBuffer,
         delete postFX;
         postFX = new PostFX(newWidth, newHeight);
     }
+#if JET_THREADED_RASTER
+    // Auto sizing depends on the framebuffer area; rebuild the pool lazily
+    // on the next render if the window changed size.
+    if (requestedThreadCount == 0) threadPool.reset();
+#endif
 }
 
 void Scene::addObject(Object* obj) {
@@ -401,158 +445,164 @@ static void jet_fill_u32x16(uint32_t* dest, uint32_t val, int n32) {
     }
     for (int r = n32 & 3; r-- > 0; ) *dest++ = val;
 }
+
+// Scene-local clear fill. The S3 PIE path keeps embedded clears fast; the
+// non-S3 fallback uses the runtime-dispatched desktop SIMD fill.
+static void jet_fill_rgb565(uint16_t* dest, size_t count, uint16_t color)
+{
+    if (count == 0) return;
+    size_t i = 0;
+    if ((reinterpret_cast<uintptr_t>(dest) & 2u) != 0) {
+        dest[0] = color;
+        i = 1;
+    }
+    int pairs = static_cast<int>((count - i) >> 1);
+    uint32_t* out = reinterpret_cast<uint32_t*>(dest + i);
+    const uint32_t value = static_cast<uint32_t>(color) |
+                           (static_cast<uint32_t>(color) << 16);
+    while (pairs > 0 && ((reinterpret_cast<uintptr_t>(out) & 15u) != 0)) {
+        *out++ = value;
+        --pairs;
+    }
+    jet_fill_u32x16(out, value, pairs);
+    if (((count - i) & 1u) != 0) dest[count - 1] = color;
+}
+#else
+static inline void jet_fill_rgb565(uint16_t* dest, size_t count, uint16_t color)
+{
+    Simd::fillRGB565(dest, count, color);
+}
 #endif
 
-void PERF_CRITICAL Scene::clearBuffers() {
-    //cast the framebuffer to a 32-bit pointer
-    uint32_t* framebuffer32 = (uint32_t*)framebuffer;
+void Scene::clearBuffersImpl(int yStart, int yEnd) {
+    if (!clearRenderBuffer || !framebuffer) return;
 
     // Wireframe mode forces a solid black background regardless of the
-    // configured backcolor / gradient so the outlines pop. We detour the
-    // gradient and backcolor for the duration of this clear and restore
-    // them on the way out so the host-visible state is unchanged.
-    uint16_t* savedGradient = backgroundGradientColors;
-    uint16_t  savedBack     = backcolor;
+    // configured backcolor / gradient so the outlines pop. Keep the override
+    // local: the clear may run concurrently for several bands.
     const bool wireClear = (renderer && renderer->wireframeMode);
-    if (wireClear) {
-        backgroundGradientColors = nullptr;
-        backcolor = 0;
-    }
+    uint16_t* gradient = wireClear ? nullptr : backgroundGradientColors;
+    const uint16_t clearColor = wireClear ? 0 : backcolor;
 
-    if (clearRenderBuffer) {
-        if (renderer->checkerboardMode) {
-            // Checkerboard clear: only wipe current-parity pixels. Opposite-parity
-            // pixels keep last frame's values; when CHECKERBOARD_RECONSTRUCTION
-            // is enabled the rasterizer fills them in-situ as it renders each
-            // current-parity pixel.
-            const int cbParity = renderEvenLines ? 0 : 1;
-            for (int y = 0; y < screenHeight; ++y) {
-                #if DEBUG_OVERDRAW
-                const uint16_t lineColor = 0;
-                #else
-                const uint16_t lineColor = backgroundGradientColors
-                                           ? backgroundGradientColors[y] : backcolor;
-                #endif
-                uint16_t* row = framebuffer + y * screenWidth;
-                for (int x = 0; x < screenWidth; ++x) {
-                    if (((x ^ y) & 1) == cbParity) {
-                        row[x] = lineColor;
-                    }
-                }
-            }
-            #if Z_BUFFERING
-            if (renderer->isDepthTestingEnabled()) memset(zBuffer, 0xFF, (size_t)screenWidth * screenHeight * sizeof(uint16_t));
+    yStart = std::max(0, std::min(yStart, screenHeight));
+    yEnd   = std::max(yStart, std::min(yEnd, screenHeight));
+    if (yStart >= yEnd) return;
+
+    if (renderer->checkerboardMode) {
+        // Checkerboard clear: only wipe current-parity pixels. Opposite-parity
+        // pixels keep last frame's values; when CHECKERBOARD_RECONSTRUCTION
+        // is enabled the rasterizer fills them in-situ as it renders each
+        // current-parity pixel.
+        const int cbParity = renderEvenLines ? 0 : 1;
+        for (int y = yStart; y < yEnd; ++y) {
+            #if DEBUG_OVERDRAW
+            const uint16_t lineColor = 0;
+            #else
+            const uint16_t lineColor = gradient ? gradient[y] : clearColor;
             #endif
-        } else if (renderer->interlacedMode) {
-            for (int y = (int)renderEvenLines; y < screenHeight; y += 2) {
-                #if DEBUG_OVERDRAW
-                uint16_t lineColor = 0;
-                uint32_t lineColor32 = 0;
-                #else
-                uint16_t lineColor = backgroundGradientColors ? backgroundGradientColors[y] : backcolor;
-                uint32_t lineColor32 = (lineColor << 16) | lineColor;
-                #endif
-                #if HALF_WIDTH_BUFFERS
-                const int divisor = 4;
-                #else
-                const int divisor = 2;
-                #endif
-                #if FIELD_BUFFERS
-                // Field-buffer layout: packed half-height. Row index = y>>1.
-                uint32_t* lineStart = framebuffer32 + (y >> 1) * (screenWidth / divisor);
-                #else
-                uint32_t* lineStart = framebuffer32 + y * (screenWidth / divisor);
-                #endif
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-                jet_fill_u32x16(lineStart, lineColor32, screenWidth / divisor);
-#else
-                for (int x = 0; x < screenWidth / divisor; x++) {
-                    lineStart[x] = lineColor32;
-                }
-#endif
-                #if Z_BUFFERING
-                #if HALF_WIDTH_BUFFERS
-                // Depth rows always use full screen Y, even with packed colour fields.
-                if (renderer->isDepthTestingEnabled()) memset(zBuffer + y * ZBUFFER_STRIDE(screenWidth), 0xFF, ZBUFFER_STRIDE(screenWidth) * sizeof(uint16_t));
-                #else
-                if (renderer->isDepthTestingEnabled()) memset(zBuffer + y * screenWidth, 0xFF, screenWidth * sizeof(uint16_t));
-                #endif
-                #endif
+            uint16_t* row = framebuffer + y * screenWidth;
+            for (int x = 0; x < screenWidth; ++x) {
+                if (((x ^ y) & 1) == cbParity) row[x] = lineColor;
             }
-        } else {
-            // Non-interlaced clear: fill every row. Honour the per-row
-            // background gradient if one is set; otherwise fall back to
-            // a solid backcolor. Note that `memset(fb, backcolor, ...)` is
-            // wrong for a 16-bit backcolor because memset writes bytes —
-            // we'd get backcolor's low byte duplicated. Pack two pixels per
-            // 32-bit store and walk rows so the gradient (if any) actually
-            // shows up.
-            // HALF_WIDTH_BUFFERS makes the buffer half-width. FIELD_BUFFERS
-            // additionally halves the height (each field buffer covers every other
-            // row). When only HALF_WIDTH_BUFFERS is set the buffer is half-width
-            // but FULL-height, so rowCount must be screenHeight in that case.
+        }
+        #if Z_BUFFERING
+        if (renderer->isDepthTestingEnabled()) {
+            const int stride = ZBUFFER_STRIDE(screenWidth);
+            memset(zBuffer + yStart * stride, 0xFF,
+                   (size_t)(yEnd - yStart) * stride * sizeof(uint16_t));
+        }
+        #endif
+    } else if (renderer->interlacedMode) {
+        for (int y = yStart + (((yStart ^ (int)renderEvenLines) & 1) ? 1 : 0);
+             y < yEnd; y += 2) {
+            #if DEBUG_OVERDRAW
+            const uint16_t lineColor = 0;
+            #else
+            const uint16_t lineColor = gradient ? gradient[y] : clearColor;
+            #endif
             #if HALF_WIDTH_BUFFERS
             const int rowPixels = screenWidth / 2;
-            #if FIELD_BUFFERS
-            const int rowCount  = screenHeight / 2;
-            #else
-            const int rowCount  = screenHeight;
-            #endif
             #else
             const int rowPixels = screenWidth;
-            const int rowCount  = screenHeight;
             #endif
-            const int row32     = rowPixels / 2; // pairs of pixels per row
-            // Respect yBandMin/yBandMax so the clear only touches the rows
-            // assigned to this band (critical for virtual-base-pointer band
-            // rendering where the buffer only covers [yBandMin, yBandMax)).
-            const int yClearStart = renderer ? renderer->yBandMin             : 0;
-            const int yClearEnd   = renderer ? std::min(renderer->yBandMax, rowCount) : rowCount;
-            for (int y = yClearStart; y < yClearEnd; ++y) {
-                #if DEBUG_OVERDRAW
-                const uint16_t lineColor = 0;
-                #else
-                // Source row in the gradient table maps 1:1 with the
-                // logical screen row (`screenHeight`). When the back buffer
-                // is half-height (HALF_WIDTH_BUFFERS implies a y/2-style
-                // layout in some configs), index by `y` directly because
-                // rowCount already accounts for the halving.
-                const uint16_t lineColor = backgroundGradientColors
-                                           ? backgroundGradientColors[y * (screenHeight / rowCount)]
-                                           : backcolor;
-                #endif
-                const uint32_t lineColor32 = ((uint32_t)lineColor << 16) | lineColor;
-                uint32_t* lineStart = framebuffer32 + y * row32;
-#if defined(CONFIG_IDF_TARGET_ESP32S3)
-                jet_fill_u32x16(lineStart, lineColor32, row32);
-#else
-                for (int x = 0; x < row32; ++x) lineStart[x] = lineColor32;
-#endif
-            }
-            #if Z_BUFFERING
-            // Z-buffer stride matches the rasterizer's depth-buffer layout
-            // (see ZBUFFER_STRIDE in Renderer.hpp): half-width when
-            // HALF_WIDTH_BUFFERS is on, per-pixel otherwise. Height is the
-            // full screen height regardless.
-            #if HALF_WIDTH_BUFFERS
-            if (renderer->isDepthTestingEnabled()) memset(zBuffer, 0xFF, (size_t)(screenWidth / 2) * screenHeight * sizeof(uint16_t));
+            #if FIELD_BUFFERS
+            // Field-buffer layout: packed half-height. Row index = y>>1.
+            uint16_t* lineStart = framebuffer + (y >> 1) * rowPixels;
             #else
-            if (renderer->isDepthTestingEnabled()) memset(zBuffer, 0xFF, (size_t)screenWidth * screenHeight * sizeof(uint16_t));
+            uint16_t* lineStart = framebuffer + y * rowPixels;
             #endif
+            jet_fill_rgb565(lineStart, (size_t)rowPixels, lineColor);
+            #if Z_BUFFERING
+            if (renderer->isDepthTestingEnabled()) {
+                #if HALF_WIDTH_BUFFERS
+                // Depth rows always use full screen Y, even with packed colour fields.
+                memset(zBuffer + y * ZBUFFER_STRIDE(screenWidth), 0xFF,
+                       ZBUFFER_STRIDE(screenWidth) * sizeof(uint16_t));
+                #else
+                memset(zBuffer + y * screenWidth, 0xFF, screenWidth * sizeof(uint16_t));
+                #endif
+            }
             #endif
         }
-    }
-    //memset(scanlinesUpdated, 0, screenHeight * sizeof(bool));
+    } else {
+        // Non-interlaced clear: fill every row. HALF_WIDTH_BUFFERS makes the
+        // buffer half-width. FIELD_BUFFERS additionally halves the height
+        // (each field buffer covers every other row).
+        #if HALF_WIDTH_BUFFERS
+        const int rowPixels = screenWidth / 2;
+        #if FIELD_BUFFERS
+        const int rowCount  = screenHeight / 2;
+        #else
+        const int rowCount  = screenHeight;
+        #endif
+        #else
+        const int rowPixels = screenWidth;
+        const int rowCount  = screenHeight;
+        #endif
 
-    // Restore the host-visible background state regardless of whether we
-    // detoured it for the wireframe-mode clear above.
-    if (wireClear) {
-        backgroundGradientColors = savedGradient;
-        backcolor = savedBack;
+        const int clearEnd = std::min(yEnd, rowCount);
+        if (yStart < clearEnd) {
+            if (!gradient) {
+                // Fast path: the whole range is one colour and contiguous.
+                jet_fill_rgb565(framebuffer + (size_t)yStart * rowPixels,
+                                 (size_t)(clearEnd - yStart) * rowPixels,
+                                 clearColor);
+            } else {
+                for (int y = yStart; y < clearEnd; ++y) {
+                    const uint16_t lineColor =
+                        gradient[y * (screenHeight / rowCount)];
+                    jet_fill_rgb565(framebuffer + (size_t)y * rowPixels,
+                                     (size_t)rowPixels, lineColor);
+                }
+            }
+        }
+        #if Z_BUFFERING
+        if (renderer->isDepthTestingEnabled()) {
+            #if HALF_WIDTH_BUFFERS
+            const int zStride = ZBUFFER_STRIDE(screenWidth);
+            #else
+            const int zStride = screenWidth;
+            #endif
+            const int zStart = std::min(yStart, screenHeight);
+            const int zEnd   = std::min(yEnd, screenHeight);
+            if (zStart < zEnd) {
+                memset(zBuffer + (size_t)zStart * zStride, 0xFF,
+                       (size_t)(zEnd - zStart) * zStride * sizeof(uint16_t));
+            }
+        }
+        #endif
     }
 }
 
-void Scene::prepareFrame() {
+void PERF_CRITICAL Scene::clearBuffers() {
+    // The legacy entry point clears the band selected on the rasteriser.
+    const int yStart = renderer ? renderer->yBandMin : 0;
+    const int yEnd   = renderer ? std::min(renderer->yBandMax, screenHeight)
+                                : screenHeight;
+    clearBuffersImpl(yStart, yEnd);
+}
+
+void Scene::prepareFrame(bool clearNow) {
     if (!camera) return;
     depthBuckets.setRange(camera->farPlane - camera->nearPlane);
     // renderEvenLines drives the frame-parity selection used by both interlaced
@@ -564,7 +614,7 @@ void Scene::prepareFrame() {
     renderEvenLines = (renderer->interlacedMode || renderer->checkerboardMode)
                       ? (frameCounter % 2 == 0)
                       : false;
-    clearBuffers();
+    if (clearNow) clearBuffers();
 
 #if MAX_PICK_QUERIES > 0
     // Reset pick results for this frame and hand the arrays to the
@@ -883,19 +933,21 @@ void Scene::prepareFrame() {
 }  // end prepareFrame()
 
 void Scene::clearBand(int yMin, int yMax) {
-    if (!renderer) return;
-    renderer->yBandMin = yMin;
-    renderer->yBandMax = yMax;
-    clearBuffers();
+    clearBuffersImpl(yMin, yMax);
 }
 
-void Scene::rasterizeBand(int yMin, int yMax, uint8_t* triangleFlags) {
+void Scene::rasterizeBand(int yMin, int yMax, uint8_t* triangleFlags,
+                          bool skipWaterReflect, bool waterReflectOnly) {
     // Create a thread-local copy of the rasteriser so each band worker has
     // its own yBandMin/yBandMax. Only framebuffer/zbuffer ptrs are shared;
     // writes go to non-overlapping y regions so there is no write race.
     Rasterizer bandRast = *renderer;
     bandRast.yBandMin = yMin;
     bandRast.yBandMax = yMax;
+    // The rasterizer owns the water-pass filters; driving them here keeps
+    // direct drawTriangle() callers and Scene's tiled path consistent.
+    bandRast.skipWaterReflect = skipWaterReflect;
+    bandRast.waterReflectOnly = waterReflectOnly;
 
     // 4) Flush. Count triangles that actually entered the rasterizer
     // (drawTriangle returned true). Triangles dropped by per-tri checks
@@ -931,17 +983,141 @@ void Scene::rasterizeBand(int yMin, int yMax, uint8_t* triangleFlags) {
                                    (int)t.zBias, t.objAlpha,
                                    t.brightnessPrecomputed, t.avgZ)) {
             ++rasterized;
-            if (triangleFlags) triangleFlags[idx] = 1;
+            if (triangleFlags) markRasterizedTriangle(triangleFlags, (size_t)idx);
         }
     }
     if (!triangleFlags) lastFrameRasterizedTriangles = rasterized;
 }
 
+bool Scene::hasWaterReflectTriangles() const {
+    for (const RenderTri& tri : renderQueue) {
+        if (tri.material && tri.material->shadingMode == ShadingMode::WATER_REFLECT)
+            return true;
+    }
+    return false;
+}
+
+bool Scene::hasTiledTextureTriangles() const {
+#if TEXTURE_MAPPING
+    // Tiled textures expose two feedback lanes for the old two-band worker
+    // split. A tile pool can run more bands than that, so keep scenes with
+    // tiled materials on the serial path instead of racing the feedback
+    // counters.
+    for (const RenderTri& tri : renderQueue) {
+        if (tri.material && tri.material->diffuseMap &&
+            tri.material->diffuseMap->tiled) {
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+void Scene::setThreadCount(int count) {
+#if JET_THREADED_RASTER
+    if (count < 0) count = 0;
+    if (count > 32) count = 32; // avoid oversubscribing memory bandwidth
+    requestedThreadCount = count;
+    if (count == 1) {
+        threadPool.reset();
+        return;
+    }
+    const int participants = count > 1 ? count : defaultRasterThreadCount(screenWidth, screenHeight);
+    threadPool = std::make_unique<ThreadPool>(static_cast<unsigned>(participants));
+#else
+    (void)count;
+#endif
+}
+
+int Scene::getThreadCount() const {
+#if JET_THREADED_RASTER
+    if (threadPool) return static_cast<int>(threadPool->threadCount());
+    return requestedThreadCount == 1 ? 1 : defaultRasterThreadCount(screenWidth, screenHeight);
+#else
+    return 1;
+#endif
+}
+
+void Scene::renderTiles() {
+#if JET_THREADED_RASTER
+    if (!threadPool || !renderer) return;
+    const int tileHeight = std::max(1, JET_RASTER_TILE_HEIGHT);
+    const int tileCount = std::max(1, (screenHeight + tileHeight - 1) / tileHeight);
+    const int triangleCount = static_cast<int>(renderQueue.size());
+    rasterFlags.assign(triangleCount > 0 ? (size_t)triangleCount : 1u, 0);
+    const bool waterPass = hasWaterReflectTriangles();
+
+    // First pass: everything except mirror-reading water. Clear is folded
+    // into each tile so the memory bandwidth work is parallel too.
+    threadPool->parallelFor(tileCount, [&](int tile) {
+        const int yMin = tile * tileHeight;
+        const int yMax = std::min(yMin + tileHeight, screenHeight);
+        if (yMin >= yMax) return;
+        clearBuffersImpl(yMin, yMax);
+        rasterizeBand(yMin, yMax, rasterFlags.data(), waterPass, false);
+    });
+
+    // SSR triangles must see fully committed geometry, so they run after all
+    // opaque/transparent work has joined.
+    if (waterPass) {
+        rasterizeBand(0, screenHeight, rasterFlags.data(), false, true);
+    }
+
+    int rasterized = 0;
+    for (int i = 0; i < triangleCount; ++i) {
+        if (rasterFlags[(size_t)i]) ++rasterized;
+    }
+    lastFrameRasterizedTriangles = rasterized;
+#endif
+}
+
 void Scene::render(RasterExecutor executor) {
     if (!camera) return;
-    prepareFrame();
-    if (executor) executor(*this);
-    else rasterizeBand(0, screenHeight);
+
+    bool useTiles = false;
+#if JET_THREADED_RASTER
+    if (!executor && threadedRendering && requestedThreadCount != 1) {
+        if (!threadPool) {
+            threadPool = std::make_unique<ThreadPool>(
+                static_cast<unsigned>(defaultRasterThreadCount(screenWidth, screenHeight)));
+        }
+        // Prepare first so the visibility/geometry-dependent heuristic sees
+        // this frame's queue. prepareFrame(false) leaves clearing to each
+        // tile, which is what makes the clear bandwidth parallel as well.
+        prepareFrame(false);
+        const int64_t pixels = static_cast<int64_t>(screenWidth) * screenHeight;
+        bool pickingActive = false;
+#if MAX_PICK_QUERIES > 0
+        // Pick results are one shared array; concurrent bands would race on
+        // the depth comparison. Use the serial path while queries are active.
+        pickingActive = renderer->pickQueryCount > 0;
+#endif
+        useTiles = threadPool && threadPool->threadCount() > 1 &&
+                   !pickingActive && !hasTiledTextureTriangles() &&
+                   (requestedThreadCount > 1 || pixels >= 262144 ||
+                    renderQueue.size() >= 256);
+#if NOISE_ALPHA
+        // NOISE_ALPHA keeps an LCG state per rasterizer. Splitting a triangle
+        // across bands would restart that stream and change the dither, so
+        // noise builds stay on the serial path.
+        useTiles = false;
+#endif
+        if (useTiles) {
+            renderTiles();
+        } else {
+            clearBuffersImpl(0, screenHeight);
+            rasterizeBand(0, screenHeight);
+        }
+    } else
+#endif
+    {
+        prepareFrame();
+        if (executor) executor(*this);
+        else rasterizeBand(0, screenHeight);
+    }
+#if !JET_THREADED_RASTER
+    (void)useTiles; // serial/embedded builds have no tile path
+#endif
 
     // Checkerboard reconstruction: fill in opposite-parity pixels from the
     // freshly-rendered current-parity neighbours so PostFX sees a fully-populated

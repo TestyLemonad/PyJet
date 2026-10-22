@@ -43,6 +43,17 @@
 #define TILE_WIDTH  32
 #define TILE_HEIGHT 32
 
+// JET_THREADED_RASTER: Split the framebuffer into horizontal tiles and render
+// them on a persistent CPU thread pool. Scene transforms and frustum culling
+// stay on the calling thread; only clear + raster work is parallel. Desktop
+// frontends may enable this; embedded targets should normally leave it off.
+#define JET_THREADED_RASTER 0
+
+// JET_RASTER_TILE_HEIGHT: Rows per parallel tile. Smaller tiles improve load
+// balance when geometry is concentrated; larger tiles reduce triangle-list
+// traversal overhead.
+#define JET_RASTER_TILE_HEIGHT 64
+
 // FAST_Z: Compute a single per-triangle Z value (average of the three
 // vertices) instead of interpolating Z per pixel. Much faster; accurate
 // enough when triangles are small relative to the screen.

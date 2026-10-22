@@ -23,6 +23,7 @@ else()
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
     find_package(pybind11 CONFIG REQUIRED)
+    find_package(Threads REQUIRED)
 
     file(GLOB_RECURSE PYJET_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
@@ -40,6 +41,7 @@ else()
     )
 
     target_compile_features(_pyjet PRIVATE cxx_std_17)
+    target_link_libraries(_pyjet PRIVATE Threads::Threads)
 
     install(TARGETS _pyjet
         LIBRARY DESTINATION pyjet3d

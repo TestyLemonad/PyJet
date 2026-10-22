@@ -21,7 +21,13 @@ on ordinary desktops too.
 ## Features
 
 - Pure CPU rendering; no runtime dependencies beyond the standard library.
-- Full-resolution RGB565 output with a depth buffer.
+- Full-resolution RGB565 output with a depth buffer, plus native RGB888 and
+  RGBA8888 readback (no Python-level per-frame conversion loop).
+- Multithreaded horizontal-tile rasterizer on desktop builds, with a persistent
+  thread pool, parallel clearing and deterministic output. Object frustum
+  culling happens before vertex transform/submission.
+- SSE2/AVX2 span-fill, clear and native colour-conversion kernels on x86-64,
+  with scalar fallbacks for other targets.
 - Camera with position, rotation, `lookAt()`, FOV and near/far clipping.
 - Flat, Gouraud and Phong shading, wireframe and unlit modes.
 - Directional, ambient and world-space point lighting, with per-channel light
@@ -29,7 +35,7 @@ on ordinary desktops too.
 - Triangle meshes built directly from Python lists, with automatic face normals
   or optional per-vertex normals for smooth shading.
 - Per-mesh culling, blending and depth-buffer options.
-- Framebuffer readback as `bytes`, plus RGB888 conversion.
+- Framebuffer readback as `bytes`, pixel access and frame statistics.
 - Wheels for Linux, Windows and macOS via `cibuildwheel`.
 
 ## Install
@@ -109,6 +115,42 @@ built-in FLAT/GOURAUD/PHONG paths.  If a scene has no lights at all, surfaces
 use their raw material colour at full brightness; add ambient light when you
 want visible fill in shaded areas.
 
+## Desktop performance
+
+The Python build enables the desktop tile rasterizer.  `render()` splits the
+framebuffer into horizontal tiles, clears each tile and rasterizes it on a
+persistent pool while the calling thread participates.  Object culling and
+vertex transforms run once on the calling thread before the pool starts, so
+tile workers only read the immutable render queue.  Output is deterministic:
+the serial and threaded paths produce identical pixels and triangle counts.
+
+The default pool size is adaptive and capped at eight participants to avoid
+oversubscribing memory bandwidth.  A scene can override it:
+
+```python
+scene.thread_count = 0       # auto (default)
+scene.thread_count = 4       # use four participants
+scene.thread_count = 1       # classic single-threaded renderer
+scene.threaded_rendering = False
+```
+
+In auto mode, small scenes and low resolutions stay on the serial path; the
+pool is used when the framebuffer is large enough or the scene has many
+triangles.  Reading `scene.thread_count` returns the active participant count.
+A `Scene` is not re-entrant: serialize rendering and framebuffer reads when
+using multiple Python threads.  Clear and opaque span fills use SSE2 on every
+x86-64 build and AVX2 at runtime on GCC/Clang builds that support it.
+Framebuffer readback is available in three native formats:
+
+```python
+raw565 = scene.get_framebuffer()          # 2 bytes per pixel, RGB565
+rgb888 = scene.get_framebuffer_rgb888()   # 3 bytes per pixel, R G B
+rgba   = scene.get_framebuffer_rgba8888() # 4 bytes per pixel, R G B 0xFF
+```
+
+`framebuffer_to_rgb()` and `framebuffer_to_rgba()` convert an existing RGB565
+byte string in native code, so no Python loop is needed when saving images.
+
 ## Python demos
 
 The repository contains runnable, dependency-free demos:
@@ -153,8 +195,8 @@ See [`examples/python/README.md`](examples/python/README.md) for options and
   all shading modes.
 - **Lights** — directional, ambient and world-space point lights, all evaluated
   by the built-in lit shading modes.
-- **Helpers** — `framebuffer_to_rgb()` and the small `Vector3`, `Color` value
-  types.
+- **Helpers** - native `framebuffer_to_rgb()` / `framebuffer_to_rgba()` and the
+  small `Vector3`, `Color` value types.
 
 Textures, custom shaders, sprites, particles, post-processing, picking and
 native primitive/OBJ helpers exist in the C++ engine but are not part of the
@@ -165,9 +207,10 @@ current Python API.
 Jet is a fixed-function rasteriser.  It transforms vertices with integer
 fixed-point maths, clips triangles, rasterises them with an optional depth
 buffer, and shades them using material and light data.  The Python build is
-configured for full-resolution desktop output with depth buffering and
-lighting enabled; the embedded C++ build can be trimmed for ESP32 and similar
-targets.
+configured for full-resolution desktop output with depth buffering, lighting
+and the tile thread pool enabled; the embedded C++ build can be trimmed for
+ESP32 and similar targets.  Object-level frustum culling runs before vertex
+transforms, so invisible geometry never enters the render queue.
 
 The engine supports much more than the Python wrapper exposes, including
 textures, instancing, sprites, particles, screen-space effects and custom

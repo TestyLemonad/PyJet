@@ -1,4 +1,5 @@
 import re
+import sys
 from pathlib import Path
 
 from setuptools import find_packages, setup
@@ -6,6 +7,14 @@ from pybind11.setup_helpers import Pybind11Extension, build_ext
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
+
+# The desktop Python configuration enables the std::thread raster pool.
+# Older manylinux toolchains need the pthread flag explicitly.
+extra_compile_args = []
+extra_link_args = []
+if sys.platform.startswith("linux"):
+    extra_compile_args.append("-pthread")
+    extra_link_args.append("-pthread")
 
 
 def read_version():
@@ -42,6 +51,8 @@ ext_modules = [
         include_dirs=[str(SRC / "pyjet_config"), str(SRC)],
         depends=headers,
         cxx_std=17,
+        extra_compile_args=extra_compile_args,
+        extra_link_args=extra_link_args,
     ),
 ]
 

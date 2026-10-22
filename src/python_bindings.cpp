@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "Jet.hpp"
+#include "PixelOps.hpp"
 
 namespace py = pybind11;
 using namespace Renderer;
@@ -434,6 +435,71 @@ PYBIND11_MODULE(_pyjet, m)
     m.doc() = "Python bindings for the Jet 3D software rasteriser";
     m.attr("PIXEL_FORMAT") = "RGB565";
 
+    m.def("framebuffer_to_rgb",
+          [](py::bytes framebuffer, int width, int height) {
+              if (width <= 0 || height <= 0) {
+                  throw py::value_error("width and height must be positive");
+              }
+              const size_t pixels = checked_product(
+                  static_cast<size_t>(width), static_cast<size_t>(height),
+                  "framebuffer dimensions");
+              const size_t expected = pixels * sizeof(uint16_t);
+              if (static_cast<size_t>(PyBytes_GET_SIZE(framebuffer.ptr())) != expected) {
+                  throw py::value_error(
+                      "framebuffer size does not match width * height * 2");
+              }
+              std::vector<uint8_t> output(pixels * 3);
+              const char* source = PyBytes_AS_STRING(framebuffer.ptr());
+              {
+                  py::gil_scoped_release release;
+                  convertRGB565ToRGB888(
+                      reinterpret_cast<const uint16_t*>(source),
+                      output.data(), pixels);
+              }
+              return py::bytes(reinterpret_cast<const char*>(output.data()),
+                               output.size());
+          },
+          py::arg("framebuffer"), py::arg("width"), py::arg("height"),
+          R"pbdoc(
+Convert a packed RGB565 framebuffer to RGB888 in native code.
+
+The returned ``bytes`` object contains three bytes per pixel in R, G, B order.
+This replaces the old Python-level per-frame conversion loop; the SIMD clear
+and span helpers keep the hot render path independent of the Python GIL.
+)pbdoc");
+
+    m.def("framebuffer_to_rgba",
+          [](py::bytes framebuffer, int width, int height) {
+              if (width <= 0 || height <= 0) {
+                  throw py::value_error("width and height must be positive");
+              }
+              const size_t pixels = checked_product(
+                  static_cast<size_t>(width), static_cast<size_t>(height),
+                  "framebuffer dimensions");
+              const size_t expected = pixels * sizeof(uint16_t);
+              if (static_cast<size_t>(PyBytes_GET_SIZE(framebuffer.ptr())) != expected) {
+                  throw py::value_error(
+                      "framebuffer size does not match width * height * 2");
+              }
+              std::vector<uint32_t> output(pixels);
+              const char* source = PyBytes_AS_STRING(framebuffer.ptr());
+              {
+                  py::gil_scoped_release release;
+                  convertRGB565ToRGBA8888(
+                      reinterpret_cast<const uint16_t*>(source),
+                      output.data(), pixels);
+              }
+              return py::bytes(reinterpret_cast<const char*>(output.data()),
+                               output.size() * sizeof(uint32_t));
+          },
+          py::arg("framebuffer"), py::arg("width"), py::arg("height"),
+          R"pbdoc(
+Convert a packed RGB565 framebuffer to opaque RGBA8888 bytes.
+
+Each pixel is returned as four bytes in R, G, B, 0xFF order, which is directly
+usable by Pillow ``RGBA`` images and true RGBA surfaces.
+)pbdoc");
+
     py::class_<Vector3>(m, "Vector3", "Engine-space integer vector (world units).")
         .def(py::init<int32_t, int32_t, int32_t>(),
              py::arg("x") = 0, py::arg("y") = 0, py::arg("z") = 0)
@@ -701,6 +767,39 @@ per shaded sample, so use a small number of them in software-rendered scenes.
         .def_property_readonly("last_frame_rasterized_triangles", [](const PySceneWrapper& self) {
             return self.scene->lastFrameRasterizedTriangles;
         })
+        .def_property("thread_count",
+            [](const PySceneWrapper& self) {
+                return self.scene->getThreadCount();
+            },
+            [](PySceneWrapper& self, int count) {
+                if (count < 0) {
+                    throw py::value_error("thread_count must be >= 0");
+                }
+                self.scene->setThreadCount(count);
+            },
+            R"pbdoc(
+Number of CPU participants used by the tile rasterizer (including the
+calling thread). 0 selects the hardware default, 1 forces the classic serial
+path, and values above 1 request a specific participant count. The count is
+clamped by the engine to a safe maximum.
+)pbdoc")
+        .def_property("threaded_rendering",
+            [](const PySceneWrapper& self) {
+                return self.scene->isThreadedRendering();
+            },
+            [](PySceneWrapper& self, bool enabled) {
+                self.scene->setThreadedRendering(enabled);
+            },
+            "Enable or disable the internal framebuffer tile pool.")
+        .def("setThreadCount",
+            [](PySceneWrapper& self, int count) {
+                if (count < 0) {
+                    throw py::value_error("count must be >= 0");
+                }
+                self.scene->setThreadCount(count);
+            },
+            py::arg("count"),
+            "Set raster participants: 0 = auto, 1 = serial, >1 = explicit.")
         .def("setCamera",
              [](PySceneWrapper& self, Camera& cam) {
                  cam.setFOV(cam.fov, self.width);
@@ -781,7 +880,13 @@ smooth shading.  The scene keeps the material alive.
                  // the projection tied to the actual output width even if the
                  // caller changes FOV after setCamera().
                  camera->setFOV(camera->fov, self.width);
-                 self.scene->render();
+                 {
+                     // Rendering does not touch Python objects. Releasing the
+                     // GIL lets a GUI thread stay responsive and lets the tile
+                     // pool use every requested CPU participant.
+                     py::gil_scoped_release release;
+                     self.scene->render();
+                 }
              })
         .def("get_framebuffer",
              [](const PySceneWrapper& self) {
@@ -790,6 +895,30 @@ smooth shading.  The scene keeps the material alive.
                      reinterpret_cast<const char*>(self.colorBuf.data()), bytes);
              },
              "Return width*height RGB565 pixels as little-endian bytes.")
+        .def("get_framebuffer_rgb888",
+             [](const PySceneWrapper& self) {
+                 const size_t pixels = self.colorBuf.size();
+                 std::vector<uint8_t> output(pixels * 3);
+                 {
+                     py::gil_scoped_release release;
+                     convertRGB565ToRGB888(self.colorBuf.data(), output.data(), pixels);
+                 }
+                 return py::bytes(reinterpret_cast<const char*>(output.data()),
+                                  output.size());
+             },
+             "Return the current frame as packed RGB888 bytes (3 BPP).")
+        .def("get_framebuffer_rgba8888",
+             [](const PySceneWrapper& self) {
+                 const size_t pixels = self.colorBuf.size();
+                 std::vector<uint32_t> output(pixels);
+                 {
+                     py::gil_scoped_release release;
+                     convertRGB565ToRGBA8888(self.colorBuf.data(), output.data(), pixels);
+                 }
+                 return py::bytes(reinterpret_cast<const char*>(output.data()),
+                                  output.size() * sizeof(uint32_t));
+             },
+             "Return the current frame as opaque RGBA8888 bytes (4 BPP).")
         .def("get_pixel",
              [](const PySceneWrapper& self, int x, int y) {
                  if (x < 0 || y < 0 || x >= self.width || y >= self.height) {

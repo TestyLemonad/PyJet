@@ -425,6 +425,18 @@ rgb = pyjet3d.framebuffer_to_rgb(
 Image.frombytes("RGB", (scene.width, scene.height), rgb).save("frame.png")
 ```
 
+Native 24/32-bit readback avoids the intermediate Python loop entirely.  These
+methods convert the current RGB565 buffer inside the extension:
+
+```python
+rgb = scene.get_framebuffer_rgb888()       # 3 bytes per pixel, R G B
+rgba = scene.get_framebuffer_rgba8888()    # 4 bytes per pixel, R G B 0xFF
+```
+
+`framebuffer_to_rgba(raw, width, height)` performs the same native conversion
+on an existing RGB565 `bytes` object.  Each pixel is returned in `R, G, B,
+0xFF` byte order, ready for Pillow `RGBA` images or a true RGBA surface.
+
 Useful scene properties and methods:
 
 - `scene.width`, `scene.height`: output dimensions.
@@ -434,8 +446,40 @@ Useful scene properties and methods:
 - `scene.last_frame_drawn_triangles`: triangles submitted in the last frame.
 - `scene.last_frame_rasterized_triangles`: triangles that survived clipping
   and reached the rasteriser.
+- `scene.thread_count`: write `0` for auto or `1` for serial; reading returns
+  the active participant count (including the calling thread).
+- `scene.threaded_rendering`: whether the internal tile pool is enabled.
 - `scene.get_statistics()`: returns `(objects, triangles, vertices)` for the
   current scene contents.
+
+## Desktop performance
+
+The Python configuration enables the desktop tile rasterizer.  A render is
+split into horizontal tiles; each tile clears its rows and rasterizes the
+immutable render queue on a persistent pool.  Object-level frustum culling and
+vertex transforms happen before the pool starts, so hidden objects never reach
+the transform loop or the queue.  Tile boundaries never affect the result:
+serial and threaded rendering produce identical framebuffers and triangle
+counts.
+
+The default participant count is adaptive and capped at eight to avoid
+oversubscribing memory bandwidth.  Override it when a frame has a different
+balance of clear and geometry work:
+
+```python
+scene.thread_count = 0       # auto (default)
+scene.thread_count = 4       # four participants, including the caller
+scene.thread_count = 1       # force the classic serial path
+scene.threaded_rendering = False
+```
+
+In auto mode, small framebuffers and small triangle queues stay serial.  The
+pool is created lazily, reused across frames, and the GIL is released while
+`render()` runs, so other Python threads can make progress.  A `Scene` is not
+re-entrant: serialize `render()` and framebuffer/readback calls when using
+multiple Python threads.  x86-64 builds use SSE2 span fills/clears and
+runtime-dispatched AVX2 on GCC/Clang; other architectures use portable scalar
+fallbacks.
 
 ## Animation
 
@@ -492,10 +536,15 @@ Scene(width=320, height=240)
 | `addPointLight(light)` | Add a world-space point light; the scene keeps a reference. |
 | `setBackcolor(color)` | Set the RGB565 clear colour. |
 | `setClearBuffer(clear)` | Enable/disable clearing the colour buffer each render. |
+| `setThreadCount(count)` | Set raster participants: `0` auto, `1` serial, `>1` explicit. |
+| `thread_count` | Read/write participant count (calling thread included). |
+| `threaded_rendering` | Read/write tile-pool switch. |
 | `addMesh(mesh, material)` | Copy a `Mesh` into the scene with a material. |
 | `addMesh(vertices, material, indices=[], normals=[])` | Build and add a mesh from Python sequences; optional per-vertex normals enable smooth shading. |
 | `render()` | Render one frame.  Raises if no camera is set. |
 | `get_framebuffer()` | Return `width * height * 2` bytes of little-endian RGB565. |
+| `get_framebuffer_rgb888()` | Return the current frame as packed RGB888 (3 bytes/pixel). |
+| `get_framebuffer_rgba8888()` | Return the current frame as opaque RGBA8888 bytes (4 bytes/pixel). |
 | `get_pixel(x, y)` | Return one RGB565 integer; raises `IndexError` out of range. |
 | `get_statistics()` | Return `(objects, triangles, vertices)`. |
 | `frame_counter`, `last_frame_*` | Read-only frame and submission counters. |

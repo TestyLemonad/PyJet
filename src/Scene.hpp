@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <algorithm>
+#include <memory>
 #include "Object.hpp"
 #include "Camera.hpp"
 #include "Light.hpp"
@@ -14,6 +15,24 @@
 
 #ifndef JET_SORT_DEPTH_BUCKETS
 #define JET_SORT_DEPTH_BUCKETS 64
+#endif
+
+#ifndef JET_THREADED_RASTER
+#define JET_THREADED_RASTER 0
+#endif
+
+#ifndef JET_RASTER_TILE_HEIGHT
+#define JET_RASTER_TILE_HEIGHT 64
+#endif
+
+// Auto mode avoids oversubscribing memory bandwidth on many-core desktops.
+// Applications can still request more participants with setThreadCount().
+#ifndef JET_MAX_RASTER_THREADS
+#define JET_MAX_RASTER_THREADS 8
+#endif
+
+#if JET_THREADED_RASTER
+#include "ThreadPool.hpp"
 #endif
 
 namespace Renderer {
@@ -90,7 +109,26 @@ public:
     /// @brief Run the full pipeline for one frame: cull, transform, rasterise, post-FX.
     /// An optional frontend executor replaces the full-screen raster pass.
     /// It must join its workers and publish statistics before returning.
+    ///
+    /// When JET_THREADED_RASTER is enabled and no executor is supplied, the
+    /// clear and raster phases are split into horizontal tiles. Object culling
+    /// and vertex transforms remain on the calling thread so the render queue
+    /// is immutable while workers run.
     void render(RasterExecutor executor = nullptr);
+
+    /// @brief Enable or disable the internal tile pool at runtime.
+    ///        Setting this to false restores the classic single-threaded path.
+    void setThreadedRendering(bool enabled) { threadedRendering = enabled; }
+    /// @brief Whether the internal tile pool is enabled for render().
+    bool isThreadedRendering() const { return threadedRendering; }
+
+    /// @brief Set the number of raster participants (calling thread included).
+    /// @param count 0 selects the hardware default, 1 forces serial rendering,
+    ///              values > 1 request that many participants. The pool is
+    ///              created lazily and reused across frames.
+    void setThreadCount(int count);
+    /// @brief Number of participants the pool will use (1 when unavailable).
+    int getThreadCount() const;
 
     /// @brief Phase 1 of split rendering: clear [yBandMin, yBandMax) on the rasteriser,
     ///        transform and depth-sort all objects. Does NOT rasterise triangles.
@@ -98,24 +136,31 @@ public:
     ///        Call this once per frame before any rasterizeBand() calls.
     ///        The rasteriser's yBandMin/yBandMax gate which rows clearBuffers() clears
     ///        so the framebuffer pointer can be a virtual base (adjusted for band offset).
-    void prepareFrame();
+    /// @param clearNow Pass false when the caller will clear each band itself
+    ///                 (the internal threaded renderer does this to overlap clear
+    ///                 with rasterisation).
+    void prepareFrame(bool clearNow = true);
 
     /// @brief Phase 2 of split rendering: rasterise the sorted render queue for
     ///        rows [yMin, yMax) only. Uses a thread-local copy of the rasteriser so
     ///        concurrent calls with non-overlapping y ranges use disjoint colour and depth rows.
     ///
     ///        May be called from multiple threads simultaneously with disjoint bands.
-    // Parallel callers supply separate zeroed flags (lastFrameDrawnTriangles
-    // bytes each), then OR them after joining to count unique triangles.
-    // With flags supplied this does not write shared frame statistics.
-    void rasterizeBand(int yMin, int yMax, uint8_t* triangleFlags = nullptr);
+    ///        When triangleFlags is supplied, entries are marked with relaxed
+    ///        atomic byte stores so one shared flag array can be used by all bands.
+    /// @param triangleFlags Optional array of lastFrameDrawnTriangles bytes.
+    /// @param skipWaterReflect Defer WATER_REFLECT triangles (parallel first pass).
+    /// @param waterReflectOnly Draw only WATER_REFLECT triangles (serial final pass).
+    void rasterizeBand(int yMin, int yMax, uint8_t* triangleFlags = nullptr,
+                       bool skipWaterReflect = false,
+                       bool waterReflectOnly = false);
 
     /// @brief Clear only the rows [yMin, yMax) of the current framebuffer without
     ///        re-running the transform or sort pipeline. Use this for bands 1+ when the
     ///        render queue from the preceding prepareFrame() call is still valid.
     ///
-    ///        Sets the rasteriser's yBandMin/yBandMax before clearing so the
-    ///        band-aware clear writes only into the correct region.
+    ///        This does not mutate the rasteriser's yBandMin/yBandMax, so it is
+    ///        safe to call concurrently for disjoint row ranges.
     void clearBand(int yMin, int yMax);
 
     /// @brief Advance the internal frame counter by one. Normally called automatically
@@ -292,6 +337,15 @@ private:
     // instead of whole RenderTri structs avoids a full second copy of the
     // queue per frame; rasterizeBand() walks this to draw in depth order.
     std::vector<int32_t> renderOrder;
+    // Reused one-byte-per-triangle markers for the threaded path. Bands mark
+    // entries with relaxed atomic stores; after joining we count unique hits.
+    std::vector<uint8_t> rasterFlags;
+
+#if JET_THREADED_RASTER
+    std::unique_ptr<ThreadPool> threadPool;
+    int requestedThreadCount = 0; // 0 = hardware default, 1 = serial
+#endif
+    bool threadedRendering = JET_THREADED_RASTER ? true : false;
 
     Camera* camera;
     DirectionalLight* directionalLight;
@@ -344,6 +398,10 @@ private:
 #endif // JET_MESH_INSTANCING
     void reconstructCheckerboard();
     void clearBuffers();
+    void clearBuffersImpl(int yStart, int yEnd);
+    void renderTiles();
+    bool hasWaterReflectTriangles() const;
+    bool hasTiledTextureTriangles() const;
 
 public:
     /// @brief Composite all enabled sprites onto the current framebuffer.

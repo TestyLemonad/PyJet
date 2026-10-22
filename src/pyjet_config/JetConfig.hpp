@@ -37,6 +37,24 @@
 #define TILE_WIDTH  32
 #define TILE_HEIGHT 32
 
+// JET_THREADED_RASTER: Split the framebuffer into horizontal tiles and render
+// them on a persistent CPU thread pool. Scene transforms and frustum culling
+// stay on the calling thread; only clear + raster work is parallel. The pool
+// uses std::thread and is therefore intended for desktop targets. Set to 0 to
+// keep the single-threaded renderer or disable it at runtime with
+// Scene::setThreadedRendering(false).
+#define JET_THREADED_RASTER 1
+
+// JET_RASTER_TILE_HEIGHT: Rows per parallel tile. Smaller tiles improve load
+// balance when geometry is concentrated; larger tiles reduce triangle-list
+// traversal overhead. 64 is a good default for 480p-4K desktop output.
+#define JET_RASTER_TILE_HEIGHT 64
+
+// JET_MAX_RASTER_THREADS: Upper bound for the automatic pool size. Extra
+// participants rarely help once memory bandwidth saturates; call
+// Scene::setThreadCount() to request more or fewer explicitly.
+#define JET_MAX_RASTER_THREADS 8
+
 // FAST_Z: Compute a single per-triangle Z value (average of the three
 // vertices) instead of interpolating Z per pixel. Much faster; accurate
 // enough when triangles are small relative to the screen.

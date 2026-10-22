@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.3.1
+
+### Added
+
+- Desktop tile rasterizer with a persistent `std::thread` pool. `Scene.render()`
+  splits the framebuffer into horizontal tiles, clears and rasterizes them in
+  parallel, and keeps object culling/vertex transforms ahead of the pool.
+- Runtime `Scene.thread_count` / `Scene.threaded_rendering` controls. Auto mode
+  is adaptive, capped at eight participants, and small frames stay serial.
+- SIMD RGB565 span-fill and clear kernels: SSE2 on every x86-64 build, AVX2
+  with runtime dispatch on GCC/Clang, and scalar fallbacks elsewhere.
+- Native RGB888 and RGBA8888 framebuffer readback via
+  `Scene.get_framebuffer_rgb888()` and `Scene.get_framebuffer_rgba8888()`.
+- Native `framebuffer_to_rgb()` / `framebuffer_to_rgba()` module helpers.
+- Python performance regression tests for native colour conversion, threaded
+  pixel equivalence, thread controls, and culling before submission.
+- `JET_THREADED_RASTER`, `JET_RASTER_TILE_HEIGHT` and
+  `JET_MAX_RASTER_THREADS` configuration knobs.
+
+### Changed
+
+- `Scene.prepareFrame()` accepts an optional `clearNow` argument so the
+  threaded renderer can fold clearing into each tile.
+- `Scene.rasterizeBand()` accepts optional water-reflection pass flags and uses
+  atomic byte markers for shared per-triangle statistics.
+- The GIL is released while `Scene.render()` and native framebuffer conversion
+  run.
+- Python README and API guides document native 24/32-bit output, the tile pool
+  and the early-culling order.
+
 ## 0.3.0
 
 ### Fixed
